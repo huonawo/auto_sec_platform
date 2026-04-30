@@ -80,6 +80,12 @@ Run the Docker runtime health check:
 powershell -ExecutionPolicy Bypass -File scripts\docker_health.ps1
 ```
 
+On Kali, run the read-only audit when you are unsure whether files or runtime services are current:
+
+```bash
+bash scripts/kali_audit.sh
+```
+
 ### 2. Test the API
 
 ```bash

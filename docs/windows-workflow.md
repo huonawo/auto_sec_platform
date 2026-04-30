@@ -116,6 +116,12 @@ When Docker is installed, use the helper after `docker compose up -d`:
 powershell -ExecutionPolicy Bypass -File scripts\docker_health.ps1
 ```
 
+On Kali, use the read-only audit script to find outdated files, missing safety changes, Docker issues, and API connectivity problems:
+
+```bash
+bash scripts/kali_audit.sh
+```
+
 ## Current Boundary
 
 The backend/worker image declares the minimum current scan toolchain: `nmap`, ProjectDiscovery `httpx`, and ProjectDiscovery `nuclei`. The separate `docker/kali/` tool container is still available for broader future tooling, but this pass does not wire in full Metasploit, default credential dumping, persistence execution, plugins, distributed nodes, or external LLMs.
