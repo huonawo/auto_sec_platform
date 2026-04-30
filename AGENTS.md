@@ -69,14 +69,18 @@ Copy `.env.example` to `.env` and set `REDIS_PASSWORD` before running Docker Com
 
 ## Testing And Verification
 
-No dedicated automated test suite or test runner configuration was found during initialization.
-
 For code changes, use the most relevant verification available:
+
+- Run unit tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 - Compile-check Python files when practical:
 
 ```bash
-python -m compileall backend frontend plugins
+python -m compileall backend frontend plugins tests
 ```
 
 - For API behavior, start services and check:

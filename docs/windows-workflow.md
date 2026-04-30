@@ -90,6 +90,12 @@ Normalized result records include:
 
 ## Verification
 
+Run preflight first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+```
+
 Pure Python tests:
 
 ```bash
@@ -104,6 +110,18 @@ python -m compileall backend frontend plugins tests
 
 Full API/GUI runtime verification still requires installing project dependencies such as FastAPI, Celery, Redis client, and PyQt5.
 
+When Docker is installed, use the helper after `docker compose up -d`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\docker_health.ps1
+```
+
 ## Current Boundary
 
-This pass does not install or fix Kali-side CLI tools such as `nmap`, `httpx`, `nuclei`, `katana`, or `dirsearch`. Scanner tasks now save stable error records when a Windows-side runtime issue occurs, but real scan execution still depends on the worker environment having the tools available.
+The backend/worker image declares the minimum current scan toolchain: `nmap`, ProjectDiscovery `httpx`, and ProjectDiscovery `nuclei`. The separate `docker/kali/` tool container is still available for broader future tooling, but this pass does not wire in full Metasploit, default credential dumping, persistence execution, plugins, distributed nodes, or external LLMs.
+
+High-risk actions remain disabled by default:
+
+- AD credential dumping requires both `enable_secretsdump=True` and `allow_credential_dump=True`.
+- Persistence scanning returns advisory checks and does not execute `psexec.py`.
+- All scan results retain an authorization notice.

@@ -1,3 +1,5 @@
+> Historical design draft. This file describes the original target concept and may include capabilities that are not fully implemented yet. Use `README.md` and `docs/windows-workflow.md` for current setup and runtime instructions.
+
 # 新自动化
 
 **完整 Markdown 文件**，可以直接发给 Agent（Codex / 本地 Python Agent）执行，从零生成一套 **开箱可运行的自动化渗透平台**，包含：

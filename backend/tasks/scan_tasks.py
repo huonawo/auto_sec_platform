@@ -1,4 +1,3 @@
-import json
 import os
 
 from celery import Celery
@@ -9,6 +8,7 @@ from utils.results import (
     resolve_result_path,
     save_result_record,
 )
+from utils.safety import normalize_scan_options
 
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")
 if not REDIS_PASSWORD:
@@ -29,11 +29,12 @@ def _task_id(task_self) -> str:
 
 def _run_scanner(task_self, scan_type: str, target: str, scanner_cls, options: dict = None):
     started_at = now_iso()
+    safe_options = normalize_scan_options(options)
     errors = []
     status = "completed"
     try:
         scanner = scanner_cls(target)
-        result = scanner.run(options or {})
+        result = scanner.run(safe_options)
     except Exception as exc:
         result = {}
         status = "failed"

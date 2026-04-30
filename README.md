@@ -4,6 +4,23 @@ Automated penetration testing platform for authorized security testing and lab e
 
 > **Warning**: This tool is for authorized penetration testing or lab environments only. Unauthorized use is illegal.
 
+## Current Status
+
+This README describes the current implementation. `PLAN.md` and `新自动化.md` are historical design drafts and may mention capabilities that are not fully implemented yet.
+
+- The backend and worker save normalized JSON result records under `output/`.
+- The GUI can start scan tasks, refresh result history, run AI analysis on selected results, check API health, and export JSON/HTML reports.
+- The worker image declares the minimum scan toolchain used by current tasks: `nmap`, ProjectDiscovery `httpx`, and ProjectDiscovery `nuclei`.
+- High-risk actions such as credential dumping, psexec, persistence changes, and exploitation are disabled by default.
+
+## Preflight
+
+Run this before local setup or Docker startup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+```
+
 ## Architecture
 
 ```
@@ -45,17 +62,23 @@ Automated penetration testing platform for authorized security testing and lab e
 
 ```bash
 cd auto_sec_platform
-docker-compose build
-docker-compose up -d
+docker compose build
+docker compose up -d
 ```
 
 Verify services are running:
 
 ```bash
-docker-compose ps
+docker compose ps
 ```
 
 Expected output: `backend`, `worker`, `redis`, `kali` containers running.
+
+Run the Docker runtime health check:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\docker_health.ps1
+```
 
 ### 2. Test the API
 
@@ -70,10 +93,19 @@ On Windows machine:
 
 ```bash
 pip install pyqt5 requests
+pip install -r backend/requirements.txt
 python frontend/gui/main_gui.py
 ```
 
 Configure API address in **Settings → API Configuration** if the Docker host is not localhost.
+
+You can also use the helper scripts:
+
+```bat
+windows_setup.bat
+scripts\run_tests.bat
+scripts\run_backend_local.bat
+```
 
 ## API Endpoints
 
@@ -85,6 +117,8 @@ Configure API address in **Settings → API Configuration** if the Docker host i
 | `POST` | `/scan/cve` | CVE vulnerability scan |
 | `POST` | `/scan/intranet` | Intranet host discovery |
 | `POST` | `/scan/ad` | Active Directory scan |
+| `POST` | `/scan/recon` | Reconnaissance scan |
+| `POST` | `/scan/persistence` | Advisory persistence review |
 | `POST` | `/ai/analyze` | AI vulnerability analysis |
 | `GET` | `/task/{task_id}` | Query task status |
 | `GET` | `/results` | List all scan results |
@@ -103,7 +137,7 @@ curl -X POST http://localhost:8000/scan/web \
 ```bash
 curl -X POST http://localhost:8000/ai/analyze \
   -H "Content-Type: application/json" \
-  -d '{"file_path": "/workspace/output/web_scan_20260430_120000.json"}'
+  -d '{"filename": "web_20260430_120000.json"}'
 ```
 
 **Check task status:**
@@ -114,7 +148,7 @@ curl http://localhost:8000/task/{task_id}
 ## GUI Usage
 
 1. Enter target URL or IP in the input field
-2. Select scan type (web / cve / intranet / ad)
+2. Select scan type (web / cve / intranet / ad / recon / persistence)
 3. Click **Start Scan** — task queued, GUI polls for results
 4. Once complete, vulnerability table and attack paths populate automatically
 5. Click **Run AI Analysis** to get risk scores and attack path recommendations
@@ -123,10 +157,10 @@ curl http://localhost:8000/task/{task_id}
 ### GUI Features
 
 - **Vulnerability Table**: Color-coded by severity (critical/high/medium/low)
-- **Attack Paths**: Step-by-step exploitation chains with priorities
+- **Attack Paths**: Safe validation workflows and remediation priorities
 - **Summary**: Vulnerability count breakdown by severity
 - **Log Window**: Real-time operation log with timestamps
-- **Settings**: Configurable API URL (persisted to `config.json`)
+- **Settings**: Configurable API URL (persisted to ignored local `config.json`)
 
 ## Directory Structure
 
@@ -164,11 +198,16 @@ auto_sec_platform/
 └── README.md
 ```
 
-## Toolchain (Kali Container)
+## Toolchain
+
+The backend/worker image includes the minimum runtime scanner tools used by current tasks:
 
 - **nmap**: Port scanning, service detection, vulnerability scripts
 - **httpx**: HTTP probing and technology detection
 - **nuclei**: Template-based vulnerability scanning
+
+The separate Kali container remains available for future broader tooling and manual lab work:
+
 - **Metasploit**: Exploitation framework
 - **BloodHound**: Active Directory attack path analysis
 - **Impacket**: Windows protocol interaction (psexec, secretsdump, etc.)
@@ -182,6 +221,13 @@ auto_sec_platform/
 | Shannon | `shannon` | Automated attack automation |
 
 ## Development
+
+### Verification
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall backend frontend plugins tests
+```
 
 ### Run backend locally (without Docker)
 
@@ -201,8 +247,16 @@ celery -A tasks.scan_tasks worker --loglevel=info
 ### Scale workers
 
 ```bash
-docker-compose up -d --scale worker=3
+docker compose up -d --scale worker=3
 ```
+
+## Safety Defaults
+
+- All scanning is intended only for authorized security testing or lab environments.
+- `ad` scanning requires `options.authorized=True`.
+- AD credential dumping is skipped unless both `enable_secretsdump=True` and `allow_credential_dump=True` are provided.
+- `persistence` returns advisory review checks and does not execute `psexec.py`.
+- Missing scanner tools are saved as structured result errors instead of crashing the task.
 
 ## Troubleshooting
 

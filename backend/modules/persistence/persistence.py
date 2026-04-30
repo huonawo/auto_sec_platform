@@ -1,25 +1,27 @@
-import subprocess
+from utils.parser import validate_target
 
 
 class PersistenceScanner:
     def __init__(self, target: str):
-        self.target = target
+        self.target = validate_target(target)
 
     def run(self, options: dict = None) -> dict:
         options = options or {}
-        results = {"target": self.target, "persistence_mechanisms": []}
-
-        # 使用 Impacket 检查持久化
-        try:
-            result = subprocess.run(
-                ["psexec.py", f"anonymous@{self.target}"],
-                capture_output=True, text=True, timeout=300,
-            )
-            if result.returncode != 0:
-                results["psexec_error"] = f"exit code {result.returncode}: {result.stderr.strip()}"
-            else:
-                results["psexec_output"] = result.stdout
-        except Exception as e:
-            results["psexec_error"] = str(e)
-
-        return results
+        return {
+            "target": self.target,
+            "persistence_mechanisms": [],
+            "checks": [
+                {
+                    "name": "manual-persistence-review",
+                    "status": "not_executed",
+                    "description": (
+                        "Review authorized endpoint telemetry, scheduled tasks, services, "
+                        "startup folders, and account changes using approved defensive tools."
+                    ),
+                }
+            ],
+            "warnings": [
+                "Persistence scan is advisory and does not execute psexec by default.",
+                "Remote execution and credential actions must be performed manually only within explicit authorization.",
+            ],
+        }

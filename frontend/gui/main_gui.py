@@ -115,6 +115,7 @@ class AutoSecGUI(QMainWindow):
         self._build_menu()
         self._build_ui()
         self._apply_style()
+        QTimer.singleShot(0, self._check_api_health)
         QTimer.singleShot(0, self._load_results)
 
     # ── Menu ────────────────────────────────────────────────────────────────────
@@ -167,6 +168,10 @@ class AutoSecGUI(QMainWindow):
         self.ai_btn = QPushButton("Run AI Analysis")
         self.ai_btn.clicked.connect(self._run_ai)
         input_layout.addWidget(self.ai_btn)
+
+        self.health_btn = QPushButton("Check API")
+        self.health_btn.clicked.connect(self._check_api_health)
+        input_layout.addWidget(self.health_btn)
 
         main_layout.addWidget(input_group)
 
@@ -292,19 +297,65 @@ class AutoSecGUI(QMainWindow):
             return
 
         scan_type = self.scan_type_combo.currentText()
+        if not self._confirm_authorized_scan(scan_type, target):
+            return
+
         url = f"{self.config['api_url']}/scan/{scan_type}"
 
         self.scan_btn.setEnabled(False)
         self._log(f"Starting {scan_type} scan: {target}")
         self.status_bar.showMessage(f"Scanning {target}...")
 
-        worker = APIWorker("POST", url, {"target": target})
+        worker = APIWorker("POST", url, {"target": target, "options": {"authorized": True, "safe_mode": True}})
         worker.finished.connect(self._on_scan_queued)
         worker.finished.connect(lambda: self._cleanup_worker(worker))
         worker.error.connect(self._on_api_error)
         worker.error.connect(lambda _: self._cleanup_worker(worker))
         self._workers.append(worker)
         worker.start()
+
+    def _confirm_authorized_scan(self, scan_type: str, target: str) -> bool:
+        if scan_type in {"ad", "persistence"}:
+            message = (
+                f"Confirm this {scan_type} scan is authorized for {target}.\n\n"
+                "High-risk actions such as credential dumping, psexec, or persistence changes "
+                "are disabled by default."
+            )
+        else:
+            message = f"Confirm this scan is authorized for {target}."
+        answer = QMessageBox.question(
+            self,
+            "Authorization Required",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def _check_api_health(self):
+        if hasattr(self, "health_btn"):
+            self.health_btn.setEnabled(False)
+        url = f"{self.config['api_url']}/health"
+        worker = APIWorker("GET", url)
+        worker.finished.connect(self._on_health_result)
+        worker.finished.connect(lambda: self._cleanup_worker(worker))
+        worker.error.connect(self._on_health_error)
+        worker.error.connect(lambda _: self._cleanup_worker(worker))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_health_result(self, data: dict):
+        if hasattr(self, "health_btn"):
+            self.health_btn.setEnabled(True)
+        status = data.get("status", "unknown")
+        self._log(f"API health: {status}")
+        self.status_bar.showMessage(f"API health: {status}")
+
+    def _on_health_error(self, err: str):
+        if hasattr(self, "health_btn"):
+            self.health_btn.setEnabled(True)
+        self._log(f"API health check failed: {err}")
+        self.status_bar.showMessage("API unavailable")
 
     def _run_ai(self):
         entry = self.result_combo.currentData() if self.result_combo.count() else None

@@ -26,7 +26,7 @@ class ADScanner:
             )
             return results
 
-        # BloodHound 数据收集
+        # BloodHound collection still requires the authorization gate above.
         collections = options.get("bloodhound_collections", "all")
         try:
             bh_result = subprocess.run(
@@ -40,8 +40,15 @@ class ADScanner:
         except Exception as e:
             results["bloodhound_error"] = str(e)
 
-        # Impacket 枚举 (requires explicit enable)
+        # Credential dumping is high-risk and stays disabled unless explicitly allowed.
         if options.get("enable_secretsdump"):
+            if not options.get("allow_credential_dump"):
+                results["warnings"].append(
+                    "Credential dump requested but skipped. Set allow_credential_dump=True "
+                    "only in a fully authorized lab or assessment scope."
+                )
+                return results
+
             try:
                 impacket_result = subprocess.run(
                     ["secretsdump.py", f"anonymous@{self.target}"],
