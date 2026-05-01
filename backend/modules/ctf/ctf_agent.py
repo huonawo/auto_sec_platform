@@ -208,6 +208,17 @@ class CTFAgent:
                     parts.append(f"*** FLAG FOUND: {out['flag']} ***")
         return "\n".join(parts) if parts else "No output"
 
+    def _fallback_command(self) -> str:
+        """Generate a basic enumeration command when Shannon returns nothing."""
+        if self.category == "web":
+            return f"curl -s -L {self.url}"
+        elif self.category == "pwn":
+            return f"curl -s {self.url} || echo 'connection_test'"
+        elif self.category == "crypto":
+            return f"curl -s {self.url}"
+        else:
+            return f"curl -s -L {self.url}"
+
     def solve(self):
         """Generator that yields per-round results for streaming.
 
@@ -229,11 +240,18 @@ class CTFAgent:
             steps = self._call_shannon(analysis)
             action_summary = self._extract_action_summary(steps)
 
-            # Step 3: Execute steps
+            # Step 3: Ensure at least one command to execute
+            has_commands = any(s.get("commands") for s in steps)
+            if not has_commands:
+                fallback_cmd = self._fallback_command()
+                steps = [{"step_id": "ctf-fallback", "action": "Basic enumeration", "commands": [fallback_cmd]}]
+                action_summary = f"Action: Basic enumeration\nCommands: {fallback_cmd}"
+
+            # Step 4: Execute steps
             step_results = self.executor.execute_steps(steps)
             observation_summary = self._extract_observation_summary(step_results)
 
-            # Check for flag in execution results
+            # Flag detection ONLY from executor output (not from Thought/LLM text)
             flag = None
             for sr in step_results:
                 if sr.get("flag"):

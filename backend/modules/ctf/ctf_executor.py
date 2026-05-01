@@ -6,19 +6,8 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
-_FLAG_PATTERNS = [
-    re.compile(r"flag\{([^}]+)\}", re.IGNORECASE),
-    re.compile(r"CTF\{([^}]+)\}", re.IGNORECASE),
-    re.compile(r"FLAG\{([^}]+)\}", re.IGNORECASE),
-]
-
-# Placeholder patterns: repeated single char (xxxxxx, AAAAAA), common examples
-_PLACEHOLDER_RE = re.compile(
-    r"^(.)\1{3,}$"
-    r"|^(example|test|sample|flag|ctf|your_flag_here|redacted|redact|REDACTED)$"
-    r"|^(example|test|sample|flag)_[a-z]+$",
-    re.IGNORECASE,
-)
+_FLAG_REGEX = re.compile(r"(?:flag|ctf|CTF|FLAG)\{[^}]{4,}\}", re.IGNORECASE)
+_PLACEHOLDER_FILTER = lambda f: re.match(r"^(?:flag|ctf)\{x+\}$", f, re.IGNORECASE)
 
 SKILLS_DIR = os.path.expanduser("~/.claude/skills/ctf-skills")
 
@@ -61,17 +50,18 @@ class CTFExecutor:
 
     def check_flag(self, text: str) -> str | None:
         """Search for flag patterns in text. Returns first real match or None.
-        Skips placeholder flags like CTF{xxxxxx}, flag{example}, etc.
+        Skips placeholders like CTF{xxxxxx} and flags shorter than 8 chars.
         """
         if not text:
             return None
-        for pattern in _FLAG_PATTERNS:
-            for match in pattern.finditer(text):
-                inner = match.group(1)
-                if _PLACEHOLDER_RE.match(inner):
-                    logger.debug("Skipping placeholder flag: %s", match.group(0))
-                    continue
-                return match.group(0)
+        candidates = _FLAG_REGEX.findall(text)
+        for flag in candidates:
+            if _PLACEHOLDER_FILTER(flag):
+                logger.debug("Skipping placeholder flag: %s", flag)
+                continue
+            if len(flag) < 8:
+                continue
+            return flag
         return None
 
     def load_skills(self, category: str) -> str:
