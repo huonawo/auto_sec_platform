@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem,
     QTabWidget, QLabel, QGroupBox, QComboBox, QFileDialog, QStatusBar,
     QSplitter, QHeaderView, QMessageBox, QAction, QDialog,
-    QFormLayout, QDialogButtonBox,
+    QFormLayout, QDialogButtonBox, QSpinBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QColor
@@ -64,6 +64,37 @@ class APIWorker(QThread):
                 resp = requests.get(self.url, timeout=self.timeout)
             resp.raise_for_status()
             self.finished.emit(resp.json())
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class SSEWorker(QThread):
+    """Reads Server-Sent Events from a POST endpoint and emits per-event signals."""
+    event = pyqtSignal(dict)
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, url: str, data: dict, timeout: int = 300):
+        super().__init__()
+        self.url = url
+        self.data = data
+        self.timeout = timeout
+
+    def run(self):
+        try:
+            with requests.post(self.url, json=self.data, timeout=self.timeout, stream=True) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload.strip() == "[DONE]":
+                        break
+                    try:
+                        self.event.emit(json.loads(payload))
+                    except json.JSONDecodeError:
+                        pass
+            self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
 
@@ -226,6 +257,67 @@ class AutoSecGUI(QMainWindow):
         self.suggest_text.setReadOnly(True)
         self.suggest_text.setFont(QFont("Consolas", 10))
         tabs.addTab(self.suggest_text, "AI Suggestions")
+
+        # CTF Solver tab
+        ctf_tab = QWidget()
+        ctf_layout = QVBoxLayout(ctf_tab)
+
+        ctf_input_group = QGroupBox("Challenge Info")
+        ctf_input_layout = QVBoxLayout(ctf_input_group)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("URL:"))
+        self.ctf_url_input = QLineEdit()
+        self.ctf_url_input.setPlaceholderText("Challenge URL or target (e.g. http://ctf.example.com:8080)")
+        row1.addWidget(self.ctf_url_input, 1)
+        ctf_input_layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Description:"))
+        self.ctf_desc_input = QTextEdit()
+        self.ctf_desc_input.setPlaceholderText("Challenge description, hints, or file info...")
+        self.ctf_desc_input.setMaximumHeight(80)
+        row2.addWidget(self.ctf_desc_input, 1)
+        ctf_input_layout.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Category:"))
+        self.ctf_category_combo = QComboBox()
+        self.ctf_category_combo.addItems(["web", "pwn", "crypto", "misc", "reverse", "forensics", "osint", "malware"])
+        row3.addWidget(self.ctf_category_combo)
+        row3.addWidget(QLabel("CTF Name:"))
+        self.ctf_name_input = QLineEdit()
+        self.ctf_name_input.setPlaceholderText("Optional")
+        row3.addWidget(self.ctf_name_input)
+        row3.addWidget(QLabel("Timeout:"))
+        self.ctf_timeout_spin = QSpinBox()
+        self.ctf_timeout_spin.setRange(60, 1800)
+        self.ctf_timeout_spin.setValue(300)
+        self.ctf_timeout_spin.setSuffix("s")
+        row3.addWidget(self.ctf_timeout_spin)
+        self.ctf_solve_btn = QPushButton("Solve")
+        self.ctf_solve_btn.setStyleSheet("background: #a6e3a1; color: #1e1e2e;")
+        self.ctf_solve_btn.clicked.connect(self._ctf_solve)
+        row3.addWidget(self.ctf_solve_btn)
+        ctf_input_layout.addLayout(row3)
+
+        ctf_layout.addWidget(ctf_input_group)
+
+        # Flag display (hidden by default)
+        self.ctf_flag_label = QLabel("")
+        self.ctf_flag_label.setFont(QFont("Consolas", 16, QFont.Bold))
+        self.ctf_flag_label.setStyleSheet("color: #a6e3a1; padding: 10px;")
+        self.ctf_flag_label.setAlignment(Qt.AlignCenter)
+        self.ctf_flag_label.hide()
+        ctf_layout.addWidget(self.ctf_flag_label)
+
+        # Agent reasoning display
+        self.ctf_output = QTextEdit()
+        self.ctf_output.setReadOnly(True)
+        self.ctf_output.setFont(QFont("Consolas", 10))
+        ctf_layout.addWidget(self.ctf_output, 1)
+
+        tabs.addTab(ctf_tab, "CTF Solver")
 
         splitter.addWidget(tabs)
 
@@ -412,6 +504,106 @@ class AutoSecGUI(QMainWindow):
         self._populate_summary(summary_data)
 
         self.status_bar.showMessage("Auto pentest completed")
+
+    # ── CTF Solver ──────────────────────────────────────────────────────────────
+
+    def _ctf_solve(self):
+        url = self.ctf_url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Warning", "Please enter a challenge URL.")
+            return
+
+        description = self.ctf_desc_input.toPlainText().strip()
+        if not description:
+            QMessageBox.warning(self, "Warning", "Please enter a challenge description.")
+            return
+
+        self.ctf_solve_btn.setEnabled(False)
+        self.ctf_flag_label.hide()
+        self.ctf_output.clear()
+        self._log(f"[CTF] Starting solver: {url}")
+        self.status_bar.showMessage("CTF solver running...")
+
+        api_url = f"{self.config['api_url']}/ctf/solve"
+        data = {
+            "url": url,
+            "description": description,
+            "category": self.ctf_category_combo.currentText(),
+            "ctf_name": self.ctf_name_input.text().strip(),
+            "timeout": self.ctf_timeout_spin.value(),
+        }
+
+        self._ctf_worker = SSEWorker(api_url, data, timeout=self.ctf_timeout_spin.value())
+        self._ctf_worker.event.connect(self._on_ctf_event)
+        self._ctf_worker.finished.connect(self._on_ctf_finished)
+        self._ctf_worker.error.connect(self._on_ctf_error)
+        self._ctf_worker.start()
+
+    def _on_ctf_event(self, data: dict):
+        status = data.get("status", "")
+        round_num = data.get("round", 0)
+        thought = data.get("thought", "")
+        action = data.get("action", "")
+        observation = data.get("observation", "")
+        flag = data.get("flag")
+
+        cursor = self.ctf_output.textCursor()
+        cursor.movePosition(cursor.End)
+
+        def _html(text, color=None):
+            if color:
+                return f'<span style="color:{color};font-size:12px">{text}</span><br>'
+            return f'<span style="font-size:12px">{text}</span><br>'
+
+        cursor.insertHtml(_html(f'<br>{"═" * 40}', "#89b4fa"))
+        cursor.insertHtml(_html(f'═══ Round {round_num} {"═" * (35 - len(str(round_num)))}', "#89b4fa"))
+
+        if thought:
+            cursor.insertHtml(_html(f'<br>💭 <b>Thought:</b>', "#89d4ef"))
+            for line in thought.split("\n"):
+                cursor.insertHtml(_html(f'  {line}', "#89d4ef"))
+
+        if action:
+            cursor.insertHtml(_html(f'<br>⚡ <b>Action:</b>', "#f9e2af"))
+            for line in action.split("\n"):
+                cursor.insertHtml(_html(f'  {line}', "#f9e2af"))
+
+        if observation:
+            cursor.insertHtml(_html(f'<br>📋 <b>Observation:</b>', "#cdd6f4"))
+            for line in observation.split("\n"):
+                cursor.insertHtml(_html(f'  {line}', "#a6adc8"))
+
+        if flag:
+            cursor.insertHtml(_html(f'<br>{"🎉" * 5}', "#a6e3a1"))
+            cursor.insertHtml(
+                f'<span style="color:#a6e3a1;font-size:18px;font:bold">'
+                f'FLAG: {flag}</span><br>')
+            cursor.insertHtml(_html(f'{"🎉" * 5}', "#a6e3a1"))
+            self.ctf_flag_label.setText(f"FLAG: {flag}")
+            self.ctf_flag_label.show()
+            self._log(f"[CTF] FLAG FOUND: {flag}")
+
+        if status == "max_rounds_reached":
+            msg = data.get("message", "Reached maximum rounds without finding flag.")
+            cursor.insertHtml(_html(f'<br>{msg}', "#f38ba8"))
+
+        self.ctf_output.setTextCursor(cursor)
+        self.ctf_output.ensureCursorVisible()
+
+    def _on_ctf_finished(self):
+        self.ctf_solve_btn.setEnabled(True)
+        self.status_bar.showMessage("CTF solver finished")
+        self._log("[CTF] Solver finished")
+
+    def _on_ctf_error(self, err: str):
+        self.ctf_solve_btn.setEnabled(True)
+        self._log(f"[CTF] Error: {err}")
+        self.status_bar.showMessage("CTF solver error")
+        cursor = self.ctf_output.textCursor()
+        cursor.movePosition(cursor.End)
+        cursor.insertHtml(
+            f'<span style="color:#f38ba8;font-size:12px"><br>Error: {err}</span><br>')
+        self.ctf_output.setTextCursor(cursor)
 
     @staticmethod
     def _unwrap_raw(d: dict) -> dict:

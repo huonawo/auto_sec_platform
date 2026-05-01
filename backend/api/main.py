@@ -1,10 +1,12 @@
 import os
 import re
+import json
 import logging
 
 import httpx as httpx_client
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional
 
@@ -89,6 +91,22 @@ class PentestAutoRequest(BaseModel):
     @classmethod
     def validate_target(cls, v: str) -> str:
         return _validate_target(v)
+
+
+class CTFSolveRequest(BaseModel):
+    url: str
+    description: str
+    category: str = "web"
+    ctf_name: str = ""
+    timeout: int = 300
+
+    @field_validator("category")
+    @classmethod
+    def validate_category(cls, v: str) -> str:
+        allowed = {"web", "pwn", "crypto", "misc", "reverse", "forensics", "osint", "malware"}
+        if v not in allowed:
+            raise ValueError(f"category must be one of: {', '.join(sorted(allowed))}")
+        return v
 
 
 # ── Health Check ────────────────────────────────────────────────────────────────
@@ -242,6 +260,34 @@ def pentest_auto(req: PentestAutoRequest):
         "errors": errors,
         **stages,
     }
+
+
+# ── CTF Solver ───────────────────────────────────────────────────────────────
+
+@app.post("/ctf/solve")
+def ctf_solve(req: CTFSolveRequest):
+    """CTF multi-agent solver with SSE streaming."""
+    from modules.ctf.ctf_agent import CTFAgent
+
+    agent = CTFAgent(
+        url=req.url,
+        description=req.description,
+        category=req.category,
+        ctf_name=req.ctf_name,
+        max_rounds=15,
+        timeout=req.timeout,
+    )
+
+    def event_stream():
+        for result in agent.solve():
+            yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Task Status ─────────────────────────────────────────────────────────────────
