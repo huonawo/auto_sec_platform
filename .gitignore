@@ -28,6 +28,9 @@ report.html
 venv/
 env/
 
+# Pre-built security tool binaries (large files)
+backend/tools/
+
 # IDE and OS noise
 .idea/
 .vscode/
