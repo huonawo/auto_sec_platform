@@ -19,7 +19,10 @@ import requests
 
 # ── Config ──────────────────────────────────────────────────────────────────────
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+if getattr(sys, 'frozen', False):
+    CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".autosec_config.json")
+else:
+    CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
     "api_url": "http://localhost:8000",
