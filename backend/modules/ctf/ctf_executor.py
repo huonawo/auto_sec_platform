@@ -13,7 +13,7 @@ SKILLS_DIR = os.path.expanduser("~/.claude/skills/ctf-skills")
 
 
 class CTFExecutor:
-    """Executes commands directly in the backend container via subprocess."""
+    """Executes commands directly in the backend container."""
 
     def __init__(self, timeout: int = 60):
         self.timeout = timeout
@@ -34,7 +34,6 @@ class CTFExecutor:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                env={**os.environ, "http_proxy": "", "https_proxy": ""},
             )
             result["stdout"] = proc.stdout
             result["stderr"] = proc.stderr

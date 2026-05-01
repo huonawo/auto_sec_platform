@@ -3,7 +3,7 @@ FROM kalilinux/kali-rolling:latest
 RUN sed -i 's|http://mirrors.neusoft.edu.cn/kali|https://mirrors.tuna.tsinghua.edu.cn/kali|g' /etc/apt/sources.list && \
     apt-get update && apt-get install -y --fix-missing \
     python3 python3-pip \
-    nmap \
+    nmap curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/backend
