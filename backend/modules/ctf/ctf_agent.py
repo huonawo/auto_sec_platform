@@ -84,6 +84,51 @@ class CTFAgent:
 
         return "\n".join(parts)
 
+    def _recon_commands(self) -> list[str]:
+        """Round 1 fixed recon commands."""
+        return [
+            f"curl -s {self.url}",
+            f"curl -sI {self.url}",
+            f"curl -s {self.url} | grep -i base64",
+        ]
+
+    def _fallback_from_analysis(self, analysis: dict) -> list[str]:
+        """Generate commands from PentestGPT analysis when Shannon returns nothing."""
+        cmds = []
+        next_steps = analysis.get("next_steps", [])
+        attack_ideas = analysis.get("attack_ideas", [])
+
+        # Always try basic page fetch
+        cmds.append(f"curl -s -L {self.url}")
+
+        # Derive hints from analysis
+        hints = []
+        for s in next_steps[:3]:
+            text = s if isinstance(s, str) else s.get("description", "")
+            hints.append(text.lower())
+        for idea in attack_ideas[:3]:
+            if isinstance(idea, dict):
+                hints.append((idea.get("technique", "") + " " + idea.get("description", "")).lower())
+
+        hint_blob = " ".join(hints)
+        if "header" in hint_blob or "response" in hint_blob:
+            cmds.append(f"curl -sI {self.url}")
+        if "source" in hint_blob or "comment" in hint_blob or "html" in hint_blob:
+            cmds.append(f"curl -s {self.url} | grep -iE 'flag|ctf|secret|key|password|admin|hidden'")
+        if "base64" in hint_blob or "encode" in hint_blob:
+            cmds.append(f"curl -s {self.url} | grep -i base64")
+        if "cookie" in hint_blob:
+            cmds.append(f"curl -sv {self.url} 2>&1 | grep -i set-cookie")
+        if "redirect" in hint_blob or "302" in hint_blob:
+            cmds.append(f"curl -sI -L {self.url} | grep -iE 'location|HTTP'")
+        if "robots" in hint_blob:
+            cmds.append(f"curl -s {self.url}/robots.txt")
+        if "admin" in hint_blob or "login" in hint_blob:
+            cmds.append(f"curl -s {self.url}/admin")
+            cmds.append(f"curl -s {self.url}/login")
+
+        return cmds[:5]
+
     def _call_pentestgpt(self, context: str) -> dict:
         """Call PentestGPT /analyze to get attack reasoning."""
         try:
@@ -94,14 +139,17 @@ class CTFAgent:
                     "target": self.url,
                     "context": (
                         "This is a CTF challenge. Analyze the challenge and suggest "
-                        "the next attack approach. Focus on what has NOT been tried yet. "
-                        "If you believe the flag can be found directly, include it in your response."
+                        "the next attack approach. Focus on what has NOT been tried yet."
                     ),
                 },
                 timeout=120,
             )
             resp.raise_for_status()
-            return resp.json().get("analysis", resp.json())
+            data = resp.json()
+            analysis = data.get("analysis", data)
+            logger.info("[CTF Agent] PentestGPT raw: %s",
+                        json.dumps(data, ensure_ascii=False)[:600])
+            return analysis
         except Exception as e:
             logger.warning("[CTF Agent] PentestGPT call failed: %s", e)
             return {"error": str(e)}
@@ -128,6 +176,8 @@ class CTFAgent:
         if not action:
             action = "Enumerate and analyze the target for vulnerabilities"
 
+        logger.info("[CTF Agent] Shannon request: action=%s tool=%s", action, tool)
+
         try:
             resp = httpx_client.post(
                 f"{SHANNON_URL}/execute",
@@ -144,10 +194,16 @@ class CTFAgent:
                 timeout=120,
             )
             resp.raise_for_status()
-            execution = resp.json().get("execution", resp.json())
+            data = resp.json()
+            logger.info("[CTF Agent] Shannon raw: %s",
+                        json.dumps(data, ensure_ascii=False)[:600])
+
+            execution = data.get("execution", data)
             commands = execution.get("commands", [])
             if isinstance(commands, str):
                 commands = [commands]
+
+            logger.info("[CTF Agent] Shannon commands: %s", commands)
             return [{"step_id": "ctf-step", "action": action, "commands": commands}]
         except Exception as e:
             logger.warning("[CTF Agent] Shannon call failed: %s", e)
@@ -186,7 +242,9 @@ class CTFAgent:
             if action:
                 parts.append(f"Action: {action}")
             if commands:
-                parts.append("Commands: " + " | ".join(commands[:3]))
+                parts.append("Commands:\n" + "\n".join(f"  $ {c}" for c in commands[:5]))
+            else:
+                parts.append("Commands: (none)")
         return "\n".join(parts) if parts else "No commands generated"
 
     def _extract_observation_summary(self, step_results: list[dict]) -> str:
@@ -197,8 +255,10 @@ class CTFAgent:
                 stdout = out.get("stdout", "").strip()
                 stderr = out.get("stderr", "").strip()
                 cmd = out.get("command", "")
+                rc = out.get("returncode", -1)
                 if cmd:
                     parts.append(f"$ {cmd}")
+                parts.append(f"[exit code: {rc}]")
                 if stdout:
                     truncated = stdout[:800] + ("..." if len(stdout) > 800 else "")
                     parts.append(truncated)
@@ -208,17 +268,6 @@ class CTFAgent:
                     parts.append(f"*** FLAG FOUND: {out['flag']} ***")
         return "\n".join(parts) if parts else "No output"
 
-    def _fallback_command(self) -> str:
-        """Generate a basic enumeration command when Shannon returns nothing."""
-        if self.category == "web":
-            return f"curl -s -L {self.url}"
-        elif self.category == "pwn":
-            return f"curl -s {self.url} || echo 'connection_test'"
-        elif self.category == "crypto":
-            return f"curl -s {self.url}"
-        else:
-            return f"curl -s -L {self.url}"
-
     def solve(self):
         """Generator that yields per-round results for streaming.
 
@@ -227,51 +276,98 @@ class CTFAgent:
         self._load_skills()
 
         for round_num in range(1, self.max_rounds + 1):
+            log = []
+            log.append(f"{'═' * 50}")
+            log.append(f"  Round {round_num} / {self.max_rounds}")
+            log.append(f"{'═' * 50}")
             logger.info("[CTF Agent] === Round %d/%d ===", round_num, self.max_rounds)
 
+            # ── Step 1: PentestGPT ──
+            log.append("")
+            log.append("── Step 1: PentestGPT Analysis ──")
             context = self._build_context()
-
-            # Step 1: PentestGPT analysis (thought only — no flag detection here)
             analysis = self._call_pentestgpt(context)
             thought_summary = self._extract_thought_summary(analysis)
             self.tried_methods.add(thought_summary[:100])
+            log.append(thought_summary[:600])
+            if len(thought_summary) > 600:
+                log.append("  ... (truncated)")
 
-            # Step 2: Shannon generates concrete steps
-            steps = self._call_shannon(analysis)
-            action_summary = self._extract_action_summary(steps)
+            # ── Step 2: Build command list ──
+            log.append("")
+            log.append("── Step 2: Command Planning ──")
 
-            # Step 3: Ensure at least one command to execute
-            has_commands = any(s.get("commands") for s in steps)
-            if not has_commands:
-                fallback_cmd = self._fallback_command()
-                steps = [{"step_id": "ctf-fallback", "action": "Basic enumeration", "commands": [fallback_cmd]}]
-                action_summary = f"Action: Basic enumeration\nCommands: {fallback_cmd}"
+            if round_num == 1:
+                # Round 1: fixed recon commands
+                commands = self._recon_commands()
+                action_summary = "Action: Initial recon\nCommands:\n" + "\n".join(f"  $ {c}" for c in commands)
+                steps = [{"step_id": "ctf-recon", "action": "Initial recon", "commands": commands}]
+                log.append(f"Round 1: executing {len(commands)} fixed recon commands")
+            else:
+                # Round 2+: ask Shannon
+                log.append("Calling Shannon /execute ...")
+                steps = self._call_shannon(analysis)
+                raw_commands = []
+                for s in steps:
+                    raw_commands.extend(s.get("commands", []))
 
-            # Step 4: Execute steps
+                if not raw_commands:
+                    # Shannon empty → fallback from PentestGPT analysis
+                    fallback_cmds = self._fallback_from_analysis(analysis)
+                    steps = [{"step_id": "ctf-fallback", "action": "Fallback from analysis", "commands": fallback_cmds}]
+                    action_summary = "Action: Fallback from PentestGPT analysis\nCommands:\n" + "\n".join(f"  $ {c}" for c in fallback_cmds)
+                    log.append(f"Shannon returned NO commands, generated {len(fallback_cmds)} from analysis:")
+                else:
+                    action_summary = self._extract_action_summary(steps)
+                    log.append(f"Shannon returned {len(raw_commands)} command(s):")
+
+            log.append(action_summary[:500])
+
+            # ── Step 3: Execute ──
+            log.append("")
+            log.append("── Step 3: Command Execution ──")
+            log.append(f"Running in auto_sec_kali ...")
+
             step_results = self.executor.execute_steps(steps)
             observation_summary = self._extract_observation_summary(step_results)
 
-            # Flag detection ONLY from executor output (not from Thought/LLM text)
+            exec_count = sum(len(sr.get("outputs", [])) for sr in step_results)
+            log.append(f"Executed {exec_count} command(s):")
+            log.append(observation_summary[:1000])
+            if len(observation_summary) > 1000:
+                log.append("  ... (truncated)")
+
+            # ── Step 4: Flag check (executor output ONLY) ──
+            log.append("")
+            log.append("── Step 4: Flag Detection ──")
             flag = None
             for sr in step_results:
                 if sr.get("flag"):
                     flag = sr["flag"]
                     break
 
+            if flag:
+                log.append(f"FLAG FOUND: {flag}")
+            else:
+                log.append("No flag in command output")
+
+            # Build observation for GUI display
+            full_observation = "\n".join(log)
+
             # Record history
             round_record = {
                 "round": round_num,
                 "thought": thought_summary,
                 "action": action_summary,
-                "observation": observation_summary,
+                "observation": full_observation,
                 "flag": flag,
             }
             self.history.append(round_record)
 
-            # Update hypothesis based on results
+            # Update hypothesis
             if not flag and observation_summary != "No output":
                 self.current_hypothesis = (
-                    f"Round {round_num} results suggest: "
+                    f"Round {round_num} results: "
                     f"{observation_summary[:200]}. "
                     f"Need to try different approaches."
                 )
@@ -280,7 +376,7 @@ class CTFAgent:
                 "type": "round", "round": round_num,
                 "thought": thought_summary,
                 "action": action_summary,
-                "observation": observation_summary,
+                "observation": full_observation,
                 "flag": flag,
                 "status": "flag_found" if flag else "continuing",
             }
