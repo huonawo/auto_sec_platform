@@ -30,7 +30,7 @@ class WebScanner:
         # nuclei 漏洞扫描
         try:
             nuclei_result = subprocess.run(
-                ["nuclei", "-u", self.target, "-jsonl", "-silent"],
+                ["nuclei", "-u", self.target, "-t", "/root/nuclei-templates", "-jsonl", "-silent"],
                 capture_output=True, text=True, timeout=600,
             )
             if nuclei_result.returncode != 0:
