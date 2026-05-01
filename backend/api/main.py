@@ -1,6 +1,8 @@
 import os
 import re
+import logging
 
+import httpx as httpx_client
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator, model_validator
@@ -13,6 +15,8 @@ from utils.results import (
     read_result_file,
     resolve_result_path,
 )
+
+logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = str(get_output_dir())
 
@@ -76,6 +80,15 @@ class AIAnalyzeRequest(BaseModel):
             raise ValueError("filename or file_path is required")
         resolve_result_path(identifier)
         return self
+
+
+class PentestAutoRequest(BaseModel):
+    target: str
+
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, v: str) -> str:
+        return _validate_target(v)
 
 
 # ── Health Check ────────────────────────────────────────────────────────────────
@@ -142,6 +155,93 @@ def ai_analyze(req: AIAnalyzeRequest):
     identifier = req.filename or req.file_path
     task = run_ai_analysis.delay(identifier, req.model)
     return {"task_id": task.id, "status": "queued", "file": os.path.basename(identifier)}
+
+
+# ── Auto Pentest Pipeline ────────────────────────────────────────────────────
+
+PENTESTGPT_URL = os.environ.get("PENTESTGPT_URL", "http://auto_sec_pentestgpt:8001")
+SHANNON_URL = os.environ.get("SHANNON_URL", "http://auto_sec_shannon:8002")
+
+
+@app.post("/pentest/auto")
+def pentest_auto(req: PentestAutoRequest):
+    """Full auto pentest pipeline: web scan → AI analysis → PentestGPT → Shannon."""
+    from modules.webscan.webscan import WebScanner
+    from ai.ai_analysis import AIAnalyzer
+
+    stages = {}
+    errors = []
+
+    # Stage 1: Web Scan
+    logger.info("[pentest/auto] Stage 1 - Web scan: %s", req.target)
+    try:
+        scanner = WebScanner(req.target)
+        scan_results = scanner.run()
+        stages["scan_results"] = scan_results
+    except Exception as e:
+        msg = f"Web scan failed: {e}"
+        logger.warning(msg)
+        errors.append(msg)
+        stages["scan_results"] = {"target": req.target, "findings": [], "error": msg}
+
+    # Stage 2: AI Analysis
+    logger.info("[pentest/auto] Stage 2 - AI analysis")
+    try:
+        analyzer = AIAnalyzer()
+        ai_analysis = analyzer.analyze(stages["scan_results"])
+        stages["ai_analysis"] = ai_analysis
+    except Exception as e:
+        msg = f"AI analysis failed: {e}"
+        logger.warning(msg)
+        errors.append(msg)
+        stages["ai_analysis"] = {"error": msg}
+
+    # Stage 3: PentestGPT suggestions
+    logger.info("[pentest/auto] Stage 3 - PentestGPT /analyze")
+    try:
+        resp = httpx_client.post(
+            f"{PENTESTGPT_URL}/analyze",
+            json={
+                "scan_results": stages["scan_results"],
+                "target": req.target,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        stages["pentest_suggestions"] = resp.json().get("analysis", resp.json())
+    except Exception as e:
+        msg = f"PentestGPT call failed: {e}"
+        logger.warning(msg)
+        errors.append(msg)
+        stages["pentest_suggestions"] = {"error": msg}
+
+    # Stage 4: Shannon attack chain planning
+    logger.info("[pentest/auto] Stage 4 - Shannon /plan")
+    try:
+        vulns = stages.get("ai_analysis", {}).get("vulnerabilities", [])
+        resp = httpx_client.post(
+            f"{SHANNON_URL}/plan",
+            json={
+                "target": req.target,
+                "vulnerabilities": vulns,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        stages["attack_chain"] = resp.json().get("chain", resp.json())
+    except Exception as e:
+        msg = f"Shannon call failed: {e}"
+        logger.warning(msg)
+        errors.append(msg)
+        stages["attack_chain"] = {"error": msg}
+
+    return {
+        "status": "completed" if not errors else "completed_with_errors",
+        "target": req.target,
+        "stages": ["scan", "ai_analysis", "pentestgpt", "shannon"],
+        "errors": errors,
+        **stages,
+    }
 
 
 # ── Task Status ─────────────────────────────────────────────────────────────────

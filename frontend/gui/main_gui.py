@@ -46,18 +46,19 @@ class APIWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, method: str, url: str, data: dict = None):
+    def __init__(self, method: str, url: str, data: dict = None, timeout: int = 10):
         super().__init__()
         self.method = method
         self.url = url
         self.data = data
+        self.timeout = timeout
 
     def run(self):
         try:
             if self.method == "POST":
-                resp = requests.post(self.url, json=self.data, timeout=10)
+                resp = requests.post(self.url, json=self.data, timeout=self.timeout)
             else:
-                resp = requests.get(self.url, timeout=10)
+                resp = requests.get(self.url, timeout=self.timeout)
             resp.raise_for_status()
             self.finished.emit(resp.json())
         except Exception as e:
@@ -168,6 +169,11 @@ class AutoSecGUI(QMainWindow):
         self.ai_btn.clicked.connect(self._run_ai)
         input_layout.addWidget(self.ai_btn)
 
+        self.auto_btn = QPushButton("One-Click Pentest")
+        self.auto_btn.setStyleSheet("background: #f38ba8; color: #1e1e2e;")
+        self.auto_btn.clicked.connect(self._auto_pentest)
+        input_layout.addWidget(self.auto_btn)
+
         main_layout.addWidget(input_group)
 
         # ── Result History ──
@@ -211,6 +217,12 @@ class AutoSecGUI(QMainWindow):
         self.summary_text.setReadOnly(True)
         self.summary_text.setFont(QFont("Consolas", 10))
         tabs.addTab(self.summary_text, "Summary")
+
+        # AI Suggestions (for auto pentest results)
+        self.suggest_text = QTextEdit()
+        self.suggest_text.setReadOnly(True)
+        self.suggest_text.setFont(QFont("Consolas", 10))
+        tabs.addTab(self.suggest_text, "AI Suggestions")
 
         splitter.addWidget(tabs)
 
@@ -339,9 +351,120 @@ class AutoSecGUI(QMainWindow):
         self.status_bar.showMessage(f"Task {task_id} running...")
         self.poll_timer.start(self.config["poll_interval_ms"])
 
+    def _auto_pentest(self):
+        target = self.target_input.text().strip()
+        if not target:
+            QMessageBox.warning(self, "Warning", "Please enter a target.")
+            return
+
+        url = f"{self.config['api_url']}/pentest/auto"
+        self.auto_btn.setEnabled(False)
+        self.scan_btn.setEnabled(False)
+        self.ai_btn.setEnabled(False)
+        self._log(f"[Auto Pentest] Starting full pipeline: {target}")
+        self.status_bar.showMessage("Running auto pentest pipeline...")
+
+        worker = APIWorker("POST", url, {"target": target}, timeout=600)
+        worker.finished.connect(self._on_auto_pentest_result)
+        worker.finished.connect(lambda: self._cleanup_worker(worker))
+        worker.error.connect(self._on_api_error)
+        worker.error.connect(lambda _: self._cleanup_worker(worker))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_auto_pentest_result(self, data: dict):
+        self.auto_btn.setEnabled(True)
+        self.scan_btn.setEnabled(True)
+        self.ai_btn.setEnabled(True)
+
+        status = data.get("status", "")
+        errors = data.get("errors", [])
+        target = data.get("target", "")
+
+        self._log(f"[Auto Pentest] Pipeline completed: {status}")
+        for stage in data.get("stages", []):
+            self._log(f"[Auto Pentest]   - {stage}: done")
+        for err in errors:
+            self._log(f"[Auto Pentest]   WARNING: {err}")
+
+        # Populate vuln table from ai_analysis
+        ai = data.get("ai_analysis", {})
+        self._populate_vuln_table(ai if "vulnerabilities" in ai else data)
+
+        # Populate attack paths from ai_analysis
+        self._populate_attack_paths(ai if "attack_paths" in ai else data)
+
+        # Populate AI Suggestions tab from pentestgpt + shannon
+        suggestions_lines = []
+        pentest = data.get("pentest_suggestions", {})
+        if pentest and not pentest.get("error"):
+            suggestions_lines.append("=== PentestGPT Suggestions ===")
+            suggestions_lines.append("")
+            summary = pentest.get("summary", "")
+            if summary:
+                suggestions_lines.append(f"Summary: {summary}")
+            findings = pentest.get("findings", [])
+            if findings:
+                suggestions_lines.append("")
+                suggestions_lines.append("Findings:")
+                for f in findings:
+                    suggestions_lines.append(f"  - {f}")
+            next_steps = pentest.get("next_steps", [])
+            if next_steps:
+                suggestions_lines.append("")
+                suggestions_lines.append("Next Steps:")
+                for s in next_steps:
+                    suggestions_lines.append(f"  - {s}")
+            notes = pentest.get("notes", "")
+            if notes:
+                suggestions_lines.append(f"\nNotes: {notes}")
+            raw = pentest.get("raw_response", "")
+            if raw and not findings and not next_steps:
+                suggestions_lines.append(raw)
+
+        chain = data.get("attack_chain", {})
+        if chain and not chain.get("error"):
+            suggestions_lines.append("")
+            suggestions_lines.append("=== Shannon Attack Chain ===")
+            suggestions_lines.append("")
+            chain_id = chain.get("chain_id", "")
+            if chain_id:
+                suggestions_lines.append(f"Chain ID: {chain_id}")
+            steps = chain.get("steps", [])
+            if steps:
+                suggestions_lines.append("Steps:")
+                for s in steps:
+                    step_id = s.get("step_id", "?")
+                    action = s.get("action", "")
+                    tool = s.get("tool", "")
+                    desc = s.get("description", "")
+                    risk = s.get("risk_level", "")
+                    suggestions_lines.append(f"  [{step_id}] {action} ({tool}) - {desc} [risk: {risk}]")
+            raw = chain.get("raw_response", "")
+            if raw and not steps:
+                suggestions_lines.append(raw)
+
+        if not suggestions_lines:
+            suggestions_lines.append("No AI suggestions available.")
+        self.suggest_text.setPlainText("\n".join(suggestions_lines))
+
+        # Populate summary
+        scan = data.get("scan_results", {})
+        summary_data = {
+            "target": target,
+            "scan_type": "auto_pentest",
+            "status": status,
+            "result": scan,
+            **ai,
+        }
+        self._populate_summary(summary_data)
+
+        self.status_bar.showMessage("Auto pentest completed")
+
     def _on_api_error(self, err: str):
         self.scan_btn.setEnabled(True)
         self.ai_btn.setEnabled(True)
+        self.auto_btn.setEnabled(True)
         self._log(f"API Error: {err}")
         self.status_bar.showMessage("Error")
 
@@ -366,6 +489,7 @@ class AutoSecGUI(QMainWindow):
             self.poll_timer.stop()
             self.scan_btn.setEnabled(True)
             self.ai_btn.setEnabled(True)
+            self.auto_btn.setEnabled(True)
             if task_result.get("status") == "failed":
                 self._log(f"Task finished with errors: {task_result.get('errors', [])}")
                 self.status_bar.showMessage("Task finished with errors")
@@ -378,6 +502,7 @@ class AutoSecGUI(QMainWindow):
             self.poll_timer.stop()
             self.scan_btn.setEnabled(True)
             self.ai_btn.setEnabled(True)
+            self.auto_btn.setEnabled(True)
             self._log(f"Task failed: {data.get('result', 'unknown')}")
             self.status_bar.showMessage("Task failed")
             self.current_task_id = None
@@ -576,6 +701,7 @@ class AutoSecGUI(QMainWindow):
             "selected_result": self.current_result,
             "vulnerabilities": vulns,
             "attack_paths": self.path_text.toPlainText(),
+            "ai_suggestions": self.suggest_text.toPlainText(),
             "summary": self.summary_text.toPlainText(),
             "log": self.log_window.toPlainText(),
         }
@@ -614,6 +740,8 @@ class AutoSecGUI(QMainWindow):
 {vuln_rows}</table>
 
 <h2>AI Analysis And Recommendations</h2><pre>{esc(data['attack_paths'])}</pre>
+
+<h2>AI Suggestions</h2><pre>{esc(data.get('ai_suggestions', ''))}</pre>
 
 <h2>Summary</h2><pre>{esc(data['summary'])}</pre>
 
