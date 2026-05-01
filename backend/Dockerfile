@@ -7,6 +7,7 @@ RUN sed -i 's|http://mirrors.neusoft.edu.cn/kali|https://mirrors.tuna.tsinghua.e
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/backend
+ENV PYTHONPATH=/workspace/backend
 
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed -r requirements.txt

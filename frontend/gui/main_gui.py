@@ -19,7 +19,7 @@ import requests
 
 # ── Config ──────────────────────────────────────────────────────────────────────
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
     "api_url": "http://localhost:8000",
@@ -29,14 +29,14 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r") as f:
             return {**DEFAULT_CONFIG, **json.load(f)}
     return DEFAULT_CONFIG.copy()
 
 
 def save_config(config: dict):
-    with open(CONFIG_FILE, "w") as f:
+    with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
 
@@ -394,59 +394,106 @@ class AutoSecGUI(QMainWindow):
         # Populate attack paths from ai_analysis
         self._populate_attack_paths(ai if "attack_paths" in ai else data)
 
-        # Populate AI Suggestions tab from pentestgpt + shannon
-        suggestions_lines = []
+        # Populate AI Suggestions tab from pentestgpt + shannon (Chinese, structured)
+        self.suggest_text.clear()
+        cursor = self.suggest_text.textCursor()
+
+        sev_colors = {"严重": "#f38ba8", "critical": "#f38ba8", "高": "#fab387", "high": "#fab387",
+                       "中": "#f9e2af", "medium": "#f9e2af", "低": "#a6e3a1", "low": "#a6e3a1"}
+
+        def _append_heading(text):
+            cursor.insertHtml(f'<br><span style="color:#89b4fa;font-size:14px;font:bold">{text}</span><br>')
+
+        def _append_line(text, color=None):
+            if color:
+                cursor.insertHtml(f'<span style="color:{color}">{text}</span><br>')
+            else:
+                cursor.insertHtml(f'{text}<br>')
+
+        def _append_kv(key, value, val_color=None):
+            if val_color:
+                cursor.insertHtml(f'<span style="color:#cdd6f4;font:bold">{key}：</span>'
+                                  f'<span style="color:{val_color}">{value}</span><br>')
+            else:
+                cursor.insertHtml(f'<span style="color:#cdd6f4;font:bold">{key}：</span>{value}<br>')
+
+        has_content = False
         pentest = data.get("pentest_suggestions", {})
         if pentest and not pentest.get("error"):
-            suggestions_lines.append("=== PentestGPT Suggestions ===")
-            suggestions_lines.append("")
+            has_content = True
+            _append_heading("PentestGPT 漏洞分析")
+
             summary = pentest.get("summary", "")
             if summary:
-                suggestions_lines.append(f"Summary: {summary}")
+                _append_line(f'<span style="color:#f9e2af">{summary}</span>')
+
             findings = pentest.get("findings", [])
             if findings:
-                suggestions_lines.append("")
-                suggestions_lines.append("Findings:")
-                for f in findings:
-                    suggestions_lines.append(f"  - {f}")
+                for i, f in enumerate(findings, 1):
+                    _append_line("")
+                    if isinstance(f, dict):
+                        name = f.get("name", f"发现 {i}")
+                        sev = f.get("severity", "info")
+                        sev_zh = {"critical": "严重", "high": "高", "medium": "中", "low": "低"}.get(sev, sev)
+                        color = sev_colors.get(sev, "#cdd6f4")
+                        _append_line(f'<span style="color:{color};font:bold;font-size:13px">■ [{sev_zh}] {name}</span>')
+                        desc = f.get("description", "")
+                        if desc:
+                            _append_kv("描述", desc)
+                        evidence = f.get("evidence", "")
+                        if evidence:
+                            _append_kv("证据", str(evidence))
+                        risk = f.get("risk", "")
+                        if risk:
+                            _append_kv("风险", risk, color)
+                        remediation = f.get("remediation", "")
+                        if remediation:
+                            _append_kv("修复建议", f'<span style="color:#a6e3a1">{remediation}</span>')
+                    else:
+                        _append_line(f"  {i}. {f}")
+
             next_steps = pentest.get("next_steps", [])
             if next_steps:
-                suggestions_lines.append("")
-                suggestions_lines.append("Next Steps:")
-                for s in next_steps:
-                    suggestions_lines.append(f"  - {s}")
+                _append_heading("建议下一步操作")
+                for i, s in enumerate(next_steps, 1):
+                    if isinstance(s, dict):
+                        _append_line(f"  {i}. {s.get('description', s)}")
+                    else:
+                        _append_line(f"  {i}. {s}")
+
             notes = pentest.get("notes", "")
             if notes:
-                suggestions_lines.append(f"\nNotes: {notes}")
-            raw = pentest.get("raw_response", "")
-            if raw and not findings and not next_steps:
-                suggestions_lines.append(raw)
+                _append_line("")
+                _append_kv("备注", f'<span style="color:#a6adc8">{notes}</span>')
 
         chain = data.get("attack_chain", {})
         if chain and not chain.get("error"):
-            suggestions_lines.append("")
-            suggestions_lines.append("=== Shannon Attack Chain ===")
-            suggestions_lines.append("")
+            has_content = True
+            _append_heading("Shannon 攻击链规划")
             chain_id = chain.get("chain_id", "")
             if chain_id:
-                suggestions_lines.append(f"Chain ID: {chain_id}")
+                _append_kv("攻击链编号", chain_id)
             steps = chain.get("steps", [])
             if steps:
-                suggestions_lines.append("Steps:")
-                for s in steps:
-                    step_id = s.get("step_id", "?")
+                _append_line("")
+                for i, s in enumerate(steps, 1):
                     action = s.get("action", "")
                     tool = s.get("tool", "")
                     desc = s.get("description", "")
-                    risk = s.get("risk_level", "")
-                    suggestions_lines.append(f"  [{step_id}] {action} ({tool}) - {desc} [risk: {risk}]")
-            raw = chain.get("raw_response", "")
-            if raw and not steps:
-                suggestions_lines.append(raw)
+                    risk = s.get("risk_level", "中")
+                    color = sev_colors.get(risk, "#cdd6f4")
+                    risk_zh = {"critical": "严重", "high": "高", "medium": "中", "low": "低",
+                               "严重": "严重", "高": "高", "中": "中", "低": "低"}.get(risk, risk)
+                    _append_line(f'<span style="color:{color};font:bold">第{i}步</span>  '
+                                 f'<span style="color:#cdd6f4">{action}</span>  '
+                                 f'<span style="color:#89b4fa">[{tool}]</span>')
+                    if desc:
+                        _append_line(f'    <span style="color:#a6adc8">{desc}</span>')
+                    _append_line(f'    <span style="color:{color}">风险等级：{risk_zh}</span>')
+                    _append_line("")
 
-        if not suggestions_lines:
-            suggestions_lines.append("No AI suggestions available.")
-        self.suggest_text.setPlainText("\n".join(suggestions_lines))
+        if not has_content:
+            _append_line("暂无 AI 建议。")
 
         # Populate summary
         scan = data.get("scan_results", {})
