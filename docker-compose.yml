@@ -61,18 +61,32 @@ services:
       - ./output:/workspace/output
     tty: true
 
-  # pentestgpt:
-  #   image: pentestgpt/pentestgpt:latest
-  #   container_name: pentestgpt
-  #   volumes:
-  #     - ./output:/workspace/output
-  #   depends_on:
-  #     - backend
+  pentestgpt:
+    build:
+      context: .
+      dockerfile: plugins/pentestgpt/Dockerfile
+    container_name: auto_sec_pentestgpt
+    environment:
+      - AI_API_KEY=${AI_API_KEY}
+      - MIMO_API_KEY=${MIMO_API_KEY}
+      - AI_API_BASE_URL=${AI_API_BASE_URL:-https://api.xiaomimimo.com/v1}
+      - AI_MODEL=${AI_MODEL:-mimo-v2.5-pro}
+    ports:
+      - "8001:8001"
+    depends_on:
+      - backend
 
-  # shannon:
-  #   image: shannon:latest
-  #   container_name: shannon
-  #   volumes:
-  #     - ./output:/workspace/output
-  #   depends_on:
-  #     - backend
+  shannon:
+    build:
+      context: .
+      dockerfile: plugins/shannon/Dockerfile
+    container_name: auto_sec_shannon
+    environment:
+      - AI_API_KEY=${AI_API_KEY}
+      - MIMO_API_KEY=${MIMO_API_KEY}
+      - AI_API_BASE_URL=${AI_API_BASE_URL:-https://api.xiaomimimo.com/v1}
+      - AI_MODEL=${AI_MODEL:-mimo-v2.5-pro}
+    ports:
+      - "8002:8002"
+    depends_on:
+      - backend
