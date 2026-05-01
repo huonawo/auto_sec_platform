@@ -1,0 +1,74 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: auto_sec_backend
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AI_API_KEY=${AI_API_KEY:-${MIMO_API_KEY:-}}
+      - AI_API_BASE_URL=${AI_API_BASE_URL:-}
+      - AI_MODEL=${AI_MODEL:-}
+    volumes:
+      - ./output:/workspace/output
+      - ./backend:/workspace/backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: auto_sec_worker
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AI_API_KEY=${AI_API_KEY:-${MIMO_API_KEY:-}}
+      - AI_API_BASE_URL=${AI_API_BASE_URL:-}
+      - AI_MODEL=${AI_MODEL:-}
+    volumes:
+      - ./output:/workspace/output
+      - ./backend:/workspace/backend
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A tasks.scan_tasks worker --loglevel=info
+
+  redis:
+    image: redis:alpine
+    container_name: auto_sec_redis
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # Port not exposed to host — only accessible within Docker network
+
+  kali:
+    build:
+      context: ./docker/kali
+      dockerfile: Dockerfile
+    container_name: auto_sec_kali
+    volumes:
+      - ./output:/workspace/output
+    tty: true
+
+  # pentestgpt:
+  #   image: pentestgpt/pentestgpt:latest
+  #   container_name: pentestgpt
+  #   volumes:
+  #     - ./output:/workspace/output
+  #   depends_on:
+  #     - backend
+
+  # shannon:
+  #   image: shannon:latest
+  #   container_name: shannon
+  #   volumes:
+  #     - ./output:/workspace/output
+  #   depends_on:
+  #     - backend
