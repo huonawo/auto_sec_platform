@@ -13,13 +13,14 @@ SKILLS_DIR = os.path.expanduser("~/.claude/skills/ctf-skills")
 
 
 class CTFExecutor:
-    """Executes commands directly in the backend container via subprocess."""
+    """Executes commands inside the auto_sec_kali Docker container."""
 
-    def __init__(self, timeout: int = 60):
+    def __init__(self, container: str = "auto_sec_kali", timeout: int = 60):
+        self.container = container
         self.timeout = timeout
 
     def execute(self, command: str) -> dict:
-        """Run a command directly via subprocess."""
+        """Run a command inside the kali container via docker exec."""
         result = {
             "command": command,
             "stdout": "",
@@ -29,12 +30,10 @@ class CTFExecutor:
         }
         try:
             proc = subprocess.run(
-                command,
-                shell=True,
+                ["docker", "exec", self.container, "bash", "-c", command],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                env={**os.environ, "http_proxy": "", "https_proxy": ""},
             )
             result["stdout"] = proc.stdout
             result["stderr"] = proc.stderr
