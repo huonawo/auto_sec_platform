@@ -79,12 +79,18 @@ class SSEWorker(QThread):
         self.url = url
         self.data = data
         self.timeout = timeout
+        self._stop_requested = False
+
+    def request_stop(self):
+        self._stop_requested = True
 
     def run(self):
         try:
             with requests.post(self.url, json=self.data, timeout=self.timeout, stream=True) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines(decode_unicode=True):
+                    if self._stop_requested:
+                        break
                     if not line or not line.startswith("data: "):
                         continue
                     payload = line[6:]
@@ -299,6 +305,13 @@ class AutoSecGUI(QMainWindow):
         self.ctf_solve_btn.setStyleSheet("background: #a6e3a1; color: #1e1e2e;")
         self.ctf_solve_btn.clicked.connect(self._ctf_solve)
         row3.addWidget(self.ctf_solve_btn)
+
+        self.ctf_stop_btn = QPushButton("Stop")
+        self.ctf_stop_btn.setStyleSheet("background: #f38ba8; color: #1e1e2e;")
+        self.ctf_stop_btn.clicked.connect(self._ctf_stop)
+        self.ctf_stop_btn.setEnabled(False)
+        row3.addWidget(self.ctf_stop_btn)
+
         ctf_input_layout.addLayout(row3)
 
         ctf_layout.addWidget(ctf_input_group)
@@ -519,6 +532,7 @@ class AutoSecGUI(QMainWindow):
             return
 
         self.ctf_solve_btn.setEnabled(False)
+        self.ctf_stop_btn.setEnabled(True)
         self.ctf_flag_label.hide()
         self.ctf_output.clear()
         self._log(f"[CTF] Starting solver: {url}")
@@ -538,6 +552,12 @@ class AutoSecGUI(QMainWindow):
         self._ctf_worker.finished.connect(self._on_ctf_finished)
         self._ctf_worker.error.connect(self._on_ctf_error)
         self._ctf_worker.start()
+
+    def _ctf_stop(self):
+        if hasattr(self, "_ctf_worker") and self._ctf_worker.isRunning():
+            self._ctf_worker.request_stop()
+            self._log("[CTF] Stop requested")
+            self.status_bar.showMessage("CTF solver stopping...")
 
     def _on_ctf_event(self, data: dict):
         status = data.get("status", "")
@@ -592,11 +612,13 @@ class AutoSecGUI(QMainWindow):
 
     def _on_ctf_finished(self):
         self.ctf_solve_btn.setEnabled(True)
+        self.ctf_stop_btn.setEnabled(False)
         self.status_bar.showMessage("CTF solver finished")
         self._log("[CTF] Solver finished")
 
     def _on_ctf_error(self, err: str):
         self.ctf_solve_btn.setEnabled(True)
+        self.ctf_stop_btn.setEnabled(False)
         self._log(f"[CTF] Error: {err}")
         self.status_bar.showMessage("CTF solver error")
         cursor = self.ctf_output.textCursor()
