@@ -24,6 +24,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 DEFAULT_CONFIG = {
     "api_url": "http://localhost:8000",
     "poll_interval_ms": 2000,
+    "result_limit": 50,
 }
 
 
@@ -101,6 +102,10 @@ class AutoSecGUI(QMainWindow):
         super().__init__()
         self.config = load_config()
         self.current_task_id = None
+        self.results_cache: list[dict] = []
+        self.current_result: dict = {}
+        self.current_result_file = None
+        self._loading_results = False
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self._poll_task)
         self._workers: list[APIWorker] = []
@@ -110,6 +115,7 @@ class AutoSecGUI(QMainWindow):
         self._build_menu()
         self._build_ui()
         self._apply_style()
+        QTimer.singleShot(0, self._load_results)
 
     # ── Menu ────────────────────────────────────────────────────────────────────
 
@@ -151,7 +157,7 @@ class AutoSecGUI(QMainWindow):
         input_layout.addWidget(self.target_input, 1)
 
         self.scan_type_combo = QComboBox()
-        self.scan_type_combo.addItems(["web", "cve", "intranet", "ad"])
+        self.scan_type_combo.addItems(["web", "cve", "intranet", "ad", "recon", "persistence"])
         input_layout.addWidget(self.scan_type_combo)
 
         self.scan_btn = QPushButton("Start Scan")
@@ -163,6 +169,21 @@ class AutoSecGUI(QMainWindow):
         input_layout.addWidget(self.ai_btn)
 
         main_layout.addWidget(input_group)
+
+        # ── Result History ──
+        history_group = QGroupBox("Result History")
+        history_layout = QHBoxLayout(history_group)
+
+        history_layout.addWidget(QLabel("Result:"))
+        self.result_combo = QComboBox()
+        self.result_combo.currentIndexChanged.connect(self._on_result_selected)
+        history_layout.addWidget(self.result_combo, 1)
+
+        self.refresh_btn = QPushButton("Refresh Results")
+        self.refresh_btn.clicked.connect(self._load_results)
+        history_layout.addWidget(self.refresh_btn)
+
+        main_layout.addWidget(history_group)
 
         # ── Middle: Tabs ──
         splitter = QSplitter(Qt.Horizontal)
@@ -286,18 +307,24 @@ class AutoSecGUI(QMainWindow):
         worker.start()
 
     def _run_ai(self):
-        file_path = QFileDialog.getOpenFileName(
-            self, "Select Scan Result", "/workspace/output", "JSON Files (*.json)"
-        )[0]
-        if not file_path:
+        entry = self.result_combo.currentData() if self.result_combo.count() else None
+        filename = entry.get("file") if isinstance(entry, dict) else None
+        data = entry.get("data", {}) if isinstance(entry, dict) else {}
+
+        if not filename:
+            QMessageBox.warning(self, "Warning", "Please load or select a scan result first.")
+            return
+
+        if data.get("scan_type") == "ai_analysis":
+            QMessageBox.warning(self, "Warning", "Please select a raw scan result, not an AI analysis result.")
             return
 
         url = f"{self.config['api_url']}/ai/analyze"
         self.ai_btn.setEnabled(False)
-        self._log(f"Starting AI analysis: {os.path.basename(file_path)}")
+        self._log(f"Starting AI analysis: {filename}")
         self.status_bar.showMessage("Running AI analysis...")
 
-        worker = APIWorker("POST", url, {"file_path": file_path})
+        worker = APIWorker("POST", url, {"filename": filename})
         worker.finished.connect(self._on_scan_queued)
         worker.finished.connect(lambda: self._cleanup_worker(worker))
         worker.error.connect(self._on_api_error)
@@ -335,11 +362,16 @@ class AutoSecGUI(QMainWindow):
     def _on_task_result(self, data: dict):
         status = data.get("status", "")
         if status == "SUCCESS":
+            task_result = data.get("result") or {}
             self.poll_timer.stop()
             self.scan_btn.setEnabled(True)
             self.ai_btn.setEnabled(True)
-            self._log(f"Task completed: {self.current_task_id}")
-            self.status_bar.showMessage("Done")
+            if task_result.get("status") == "failed":
+                self._log(f"Task finished with errors: {task_result.get('errors', [])}")
+                self.status_bar.showMessage("Task finished with errors")
+            else:
+                self._log(f"Task completed: {self.current_task_id}")
+                self.status_bar.showMessage("Done")
             self._load_results()
             self.current_task_id = None
         elif status == "FAILURE":
@@ -351,30 +383,69 @@ class AutoSecGUI(QMainWindow):
             self.current_task_id = None
 
     def _load_results(self):
-        url = f"{self.config['api_url']}/results"
+        url = f"{self.config['api_url']}/results?limit={self.config.get('result_limit', 50)}"
+        self.refresh_btn.setEnabled(False) if hasattr(self, "refresh_btn") else None
         worker = APIWorker("GET", url)
         worker.finished.connect(self._on_results)
         worker.finished.connect(lambda: self._cleanup_worker(worker))
         worker.error.connect(lambda e: self._log(f"Results error: {e}"))
+        worker.error.connect(lambda _: self.refresh_btn.setEnabled(True) if hasattr(self, "refresh_btn") else None)
         worker.error.connect(lambda _: self._cleanup_worker(worker))
         self._workers.append(worker)
         worker.start()
 
     def _on_results(self, data: dict):
+        if hasattr(self, "refresh_btn"):
+            self.refresh_btn.setEnabled(True)
+
         results = data.get("results", [])
         if isinstance(results, dict):
             results = results.get("results", [])
+        self.results_cache = results
+
+        if hasattr(self, "result_combo"):
+            self._loading_results = True
+            self.result_combo.clear()
+            for entry in results:
+                label = self._result_label(entry)
+                self.result_combo.addItem(label, entry)
+            self._loading_results = False
+
         if not results:
             self._log("No results found")
             return
 
-        latest = results[-1].get("data", {})
-        self._populate_vuln_table(latest)
-        self._populate_attack_paths(latest)
-        self._populate_summary(latest)
+        if self.result_combo.count():
+            self.result_combo.setCurrentIndex(0)
+        self._display_result_entry(results[0])
+
+    def _result_label(self, entry: dict) -> str:
+        file_name = entry.get("file", "")
+        scan_type = entry.get("scan_type", "unknown")
+        target = entry.get("target", "")
+        status = entry.get("status", "")
+        return f"{file_name} | {scan_type} | {status} | {target}"
+
+    def _on_result_selected(self, index: int):
+        if self._loading_results or index < 0:
+            return
+        entry = self.result_combo.itemData(index)
+        if isinstance(entry, dict):
+            self._display_result_entry(entry)
+
+    def _display_result_entry(self, entry: dict):
+        data = entry.get("data", {}) if isinstance(entry, dict) else {}
+        self.current_result = data
+        self.current_result_file = entry.get("file") if isinstance(entry, dict) else None
+        if data.get("target") and not self.target_input.text().strip():
+            self.target_input.setText(str(data.get("target")))
+        self._populate_vuln_table(data)
+        self._populate_attack_paths(data)
+        self._populate_summary(data)
 
     def _populate_vuln_table(self, data: dict):
-        vulns = data.get("vulnerabilities", data.get("analysis", {}).get("vulnerabilities", []))
+        analysis = self._analysis_payload(data)
+        vulns = analysis.get("vulnerabilities", data.get("vulnerabilities", []))
         self.vuln_table.setRowCount(len(vulns))
         for i, v in enumerate(vulns):
             self.vuln_table.setItem(i, 0, QTableWidgetItem(str(v.get("vuln_id", ""))))
@@ -401,12 +472,18 @@ class AutoSecGUI(QMainWindow):
             self.vuln_table.setItem(i, 4, score_item)
 
     def _populate_attack_paths(self, data: dict):
-        paths = data.get("attack_paths", data.get("analysis", {}).get("attack_paths", []))
-        if not paths:
-            self.path_text.setPlainText("No attack paths available.")
+        analysis = self._analysis_payload(data)
+        paths = analysis.get("attack_paths", data.get("attack_paths", []))
+        recommendations = analysis.get("recommendations", data.get("recommendations", []))
+        notice = analysis.get("authorization_notice", data.get("authorization_notice", ""))
+        if not paths and not recommendations:
+            self.path_text.setPlainText("No AI analysis available for this result yet.")
             return
 
         lines = []
+        if notice:
+            lines.append(f"Authorization: {notice}")
+            lines.append("")
         for p in paths:
             lines.append(f"[{p.get('priority', '').upper()}] {p.get('name', '')}")
             for step in p.get("steps", []):
@@ -414,22 +491,47 @@ class AutoSecGUI(QMainWindow):
                 if step.get("target"):
                     lines.append(f"    Target: {step.get('target')}")
             lines.append("")
+        if recommendations:
+            lines.append("Recommendations:")
+            for item in recommendations:
+                lines.append(f"- {item}")
         self.path_text.setPlainText("\n".join(lines))
 
     def _populate_summary(self, data: dict):
-        summary = data.get("summary", data.get("analysis", {}).get("summary", {}))
-        if not summary:
-            self.summary_text.setPlainText("No summary available.")
-            return
+        analysis = self._analysis_payload(data)
+        summary = analysis.get("summary", data.get("summary", {}))
+        observations = analysis.get("observations", data.get("observations", []))
+        errors = data.get("errors", []) + analysis.get("errors", [])
+        warnings = data.get("warnings", []) + analysis.get("warnings", [])
 
         lines = [
             "=== Scan Summary ===",
+            f"File: {self.current_result_file or ''}",
+            f"Target: {data.get('target', '')}",
+            f"Scan type: {data.get('scan_type', '')}",
+            f"Status: {data.get('status', '')}",
             f"Total vulnerabilities: {summary.get('total', 0)}",
             f"  Critical: {summary.get('critical', 0)}",
             f"  High:     {summary.get('high', 0)}",
             f"  Medium:   {summary.get('medium', 0)}",
             f"  Low:      {summary.get('low', 0)}",
+            f"Open service observations: {len(observations)}",
         ]
+        if observations:
+            lines.append("")
+            lines.append("=== Observations ===")
+            for obs in observations:
+                lines.append(f"- {obs.get('port', '')}/{obs.get('protocol', '')} {obs.get('service', '')} {obs.get('description', '')}".strip())
+        if warnings:
+            lines.append("")
+            lines.append("=== Warnings ===")
+            for warning in warnings:
+                lines.append(f"- {warning}")
+        if errors:
+            lines.append("")
+            lines.append("=== Errors ===")
+            for err in errors:
+                lines.append(f"- {err}")
         self.summary_text.setPlainText("\n".join(lines))
 
     # ── Export ──────────────────────────────────────────────────────────────────
@@ -469,7 +571,9 @@ class AutoSecGUI(QMainWindow):
 
         return {
             "generated_at": datetime.now().isoformat(),
-            "target": self.target_input.text().strip(),
+            "target": self.current_result.get("target", self.target_input.text().strip()),
+            "result_file": self.current_result_file,
+            "selected_result": self.current_result,
             "vulnerabilities": vulns,
             "attack_paths": self.path_text.toPlainText(),
             "summary": self.summary_text.toPlainText(),
@@ -503,15 +607,17 @@ class AutoSecGUI(QMainWindow):
     .meta {{ color: #a6adc8; font-size: 0.9em; }}
 </style></head><body>
 <h1>AutoSec Platform Report</h1>
-<p class="meta">Generated: {esc(data['generated_at'])} &nbsp;|&nbsp; Target: <strong>{esc(data['target'])}</strong></p>
+<p class="meta">Generated: {esc(data['generated_at'])} &nbsp;|&nbsp; Target: <strong>{esc(data['target'])}</strong> &nbsp;|&nbsp; Result: {esc(str(data.get('result_file') or ''))}</p>
 
 <h2>Vulnerabilities</h2>
 <table><tr><th>ID</th><th>Name</th><th>Type</th><th>Severity</th><th>Risk Score</th></tr>
 {vuln_rows}</table>
 
-<h2>Attack Paths</h2><pre>{esc(data['attack_paths'])}</pre>
+<h2>AI Analysis And Recommendations</h2><pre>{esc(data['attack_paths'])}</pre>
 
 <h2>Summary</h2><pre>{esc(data['summary'])}</pre>
+
+<h2>Selected Result JSON</h2><pre>{esc(json.dumps(data.get('selected_result', {}), ensure_ascii=False, indent=2))}</pre>
 
 <h2>Log</h2><pre>{esc(data['log'])}</pre>
 </body></html>"""
@@ -530,6 +636,13 @@ class AutoSecGUI(QMainWindow):
     def _cleanup_worker(self, worker: APIWorker):
         if worker in self._workers:
             self._workers.remove(worker)
+
+    def _analysis_payload(self, data: dict) -> dict:
+        if isinstance(data.get("analysis"), dict):
+            return data["analysis"]
+        if any(key in data for key in ("vulnerabilities", "observations", "attack_paths", "recommendations")):
+            return data
+        return {}
 
     def _log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")

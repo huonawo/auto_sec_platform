@@ -3,10 +3,18 @@ import re
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional
 
-OUTPUT_DIR = "/workspace/output"
+from utils.results import (
+    count_result_files,
+    get_output_dir,
+    list_result_records,
+    read_result_file,
+    resolve_result_path,
+)
+
+OUTPUT_DIR = str(get_output_dir())
 
 app = FastAPI(title="AutoSec Platform", version="1.0.0")
 
@@ -57,17 +65,17 @@ class ScanRequest(BaseModel):
 
 
 class AIAnalyzeRequest(BaseModel):
-    file_path: str
+    file_path: Optional[str] = None
+    filename: Optional[str] = None
     model: Optional[str] = "default"
 
-    @field_validator("file_path")
-    @classmethod
-    def validate_file_path(cls, v: str) -> str:
-        real = os.path.realpath(v)
-        real_output = os.path.realpath(OUTPUT_DIR)
-        if not real.startswith(real_output + os.sep) and real != real_output:
-            raise ValueError("file_path must be within the output directory")
-        return v
+    @model_validator(mode="after")
+    def validate_source(self):
+        identifier = self.filename or self.file_path
+        if not identifier:
+            raise ValueError("filename or file_path is required")
+        resolve_result_path(identifier)
+        return self
 
 
 # ── Health Check ────────────────────────────────────────────────────────────────
@@ -131,8 +139,9 @@ def scan_persistence(req: ScanRequest):
 @app.post("/ai/analyze")
 def ai_analyze(req: AIAnalyzeRequest):
     from tasks.scan_tasks import run_ai_analysis
-    task = run_ai_analysis.delay(req.file_path, req.model)
-    return {"task_id": task.id, "status": "queued", "file_path": req.file_path}
+    identifier = req.filename or req.file_path
+    task = run_ai_analysis.delay(identifier, req.model)
+    return {"task_id": task.id, "status": "queued", "file": os.path.basename(identifier)}
 
 
 # ── Task Status ─────────────────────────────────────────────────────────────────
@@ -152,53 +161,25 @@ def get_task_status(task_id: str):
 
 @app.get("/results")
 def list_results(page: int = 1, limit: int = 20):
-    import json
-
-    if not os.path.exists(OUTPUT_DIR):
-        return {"results": [], "total": 0, "page": page, "limit": limit}
-
-    all_files = sorted(
-        (
-            fname
-            for fname in os.listdir(OUTPUT_DIR)
-            if fname.endswith(".json") and os.path.isfile(os.path.join(OUTPUT_DIR, fname))
-        ),
-        key=lambda f: os.path.getmtime(os.path.join(OUTPUT_DIR, f)),
-        reverse=True,
-    )
-    total = len(all_files)
-    start = (page - 1) * limit
-    page_files = all_files[start : start + limit]
-
-    results = []
-    for fname in page_files:
-        fpath = os.path.join(OUTPUT_DIR, fname)
-        try:
-            with open(fpath, "r") as f:
-                data = json.load(f)
-            results.append({"file": fname, "data": data})
-        except Exception:
-            results.append({"file": fname, "error": "failed to parse"})
-    return {"results": results, "total": total, "page": page, "limit": limit}
+    return {
+        "results": list_result_records(page=page, limit=limit),
+        "total": count_result_files(),
+        "page": page,
+        "limit": limit,
+    }
 
 
 @app.get("/results/{filename}")
 def get_result(filename: str):
-    import json
-
-    safe_name = os.path.basename(filename)
-    fpath = os.path.join(OUTPUT_DIR, safe_name)
-    real_path = os.path.realpath(fpath)
-    real_output = os.path.realpath(OUTPUT_DIR)
-
-    if not real_path.startswith(real_output + os.sep):
+    try:
+        path = resolve_result_path(filename)
+    except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
-    if not os.path.isfile(real_path):
+
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="Result not found")
 
     try:
-        with open(real_path, "r") as f:
-            data = json.load(f)
-        return {"file": safe_name, "data": data}
+        return {"file": path.name, "data": read_result_file(path.name)}
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to parse result file")

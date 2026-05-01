@@ -6,9 +6,6 @@ services:
     container_name: auto_sec_backend
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - AI_API_KEY=${AI_API_KEY:-${MIMO_API_KEY:-}}
-      - AI_API_BASE_URL=${AI_API_BASE_URL:-}
-      - AI_MODEL=${AI_MODEL:-}
     volumes:
       - ./output:/workspace/output
       - ./backend:/workspace/backend
@@ -26,9 +23,6 @@ services:
     container_name: auto_sec_worker
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - AI_API_KEY=${AI_API_KEY:-${MIMO_API_KEY:-}}
-      - AI_API_BASE_URL=${AI_API_BASE_URL:-}
-      - AI_MODEL=${AI_MODEL:-}
     volumes:
       - ./output:/workspace/output
       - ./backend:/workspace/backend
