@@ -220,20 +220,10 @@ class CTFAgent:
 
             context = self._build_context()
 
-            # Step 1: PentestGPT analysis
+            # Step 1: PentestGPT analysis (thought only — no flag detection here)
             analysis = self._call_pentestgpt(context)
             thought_summary = self._extract_thought_summary(analysis)
             self.tried_methods.add(thought_summary[:100])
-
-            # Check if PentestGPT found a flag in its analysis
-            flag = self.executor.check_flag(json.dumps(analysis, ensure_ascii=False))
-            if flag:
-                yield {
-                    "type": "round", "round": round_num,
-                    "thought": thought_summary, "action": "", "observation": "",
-                    "flag": flag, "status": "flag_found",
-                }
-                return
 
             # Step 2: Shannon generates concrete steps
             steps = self._call_shannon(analysis)
