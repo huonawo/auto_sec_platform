@@ -397,106 +397,162 @@ class AutoSecGUI(QMainWindow):
         # Populate attack paths from ai_analysis
         self._populate_attack_paths(ai if "attack_paths" in ai else data)
 
-        # Populate AI Suggestions tab from pentestgpt + shannon (Chinese, structured)
+        # Populate AI Suggestions tab
+        self._populate_ai_suggestions(data)
+
+        # Populate summary
+        scan = data.get("scan_results", {})
+        summary_data = {
+            "target": target,
+            "scan_type": "auto_pentest",
+            "status": status,
+            "result": scan,
+            **ai,
+        }
+        self._populate_summary(summary_data)
+
+        self.status_bar.showMessage("Auto pentest completed")
+
+    @staticmethod
+    def _unwrap_raw(d: dict) -> dict:
+        """If d only has raw_response, try to parse JSON from it."""
+        if "raw_response" in d and len(d) == 1:
+            raw = d["raw_response"]
+            # Strip markdown code fences
+            import re
+            cleaned = re.sub(r"^```(?:json)?\s*\n?", "", raw.strip())
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+            try:
+                return json.loads(cleaned)
+            except (json.JSONDecodeError, Exception):
+                pass
+        return d
+
+    def _populate_ai_suggestions(self, data: dict):
         self.suggest_text.clear()
         cursor = self.suggest_text.textCursor()
+        cursor.insertHtml('<span style="font-size:13px"> </span>')
 
         sev_colors = {"严重": "#f38ba8", "critical": "#f38ba8", "高": "#fab387", "high": "#fab387",
-                       "中": "#f9e2af", "medium": "#f9e2af", "低": "#a6e3a1", "low": "#a6e3a1"}
+                       "中": "#f9e2af", "medium": "#f9e2af", "低": "#a6e3a1", "low": "#a6e3a1",
+                       "info": "#89b4fa"}
+        sev_zh_map = {"critical": "严重", "high": "高", "medium": "中", "low": "低", "info": "信息",
+                       "严重": "严重", "高": "高", "中": "中", "低": "低"}
+        sev_icon = {"严重": "🔴", "critical": "🔴", "高": "🟠", "high": "🟠",
+                     "中": "🟡", "medium": "🟡", "低": "🟢", "low": "🟢", "info": "🔵"}
 
-        def _append_heading(text):
-            cursor.insertHtml(f'<br><span style="color:#89b4fa;font-size:14px;font:bold">{text}</span><br>')
+        def _heading(text):
+            cursor.insertHtml(
+                f'<br><span style="color:#89b4fa;font-size:15px;font:bold">━━ {text} ━━</span><br><br>')
 
-        def _append_line(text, color=None):
+        def _line(text, color=None):
             if color:
-                cursor.insertHtml(f'<span style="color:{color}">{text}</span><br>')
+                cursor.insertHtml(f'<span style="color:{color};font-size:12px">{text}</span><br>')
             else:
-                cursor.insertHtml(f'{text}<br>')
+                cursor.insertHtml(f'<span style="font-size:12px">{text}</span><br>')
 
-        def _append_kv(key, value, val_color=None):
+        def _kv(key, value, val_color=None):
             if val_color:
-                cursor.insertHtml(f'<span style="color:#cdd6f4;font:bold">{key}：</span>'
-                                  f'<span style="color:{val_color}">{value}</span><br>')
+                cursor.insertHtml(
+                    f'<span style="color:#cdd6f4;font:bold;font-size:12px">{key}：</span>'
+                    f'<span style="color:{val_color};font-size:12px">{value}</span><br>')
             else:
-                cursor.insertHtml(f'<span style="color:#cdd6f4;font:bold">{key}：</span>{value}<br>')
+                cursor.insertHtml(
+                    f'<span style="color:#cdd6f4;font:bold;font-size:12px">{key}：</span>'
+                    f'<span style="font-size:12px">{value}</span><br>')
+
+        def _card_sep():
+            cursor.insertHtml(
+                '<span style="color:#45475a;font-size:11px">'
+                '────────────────────────────────────────</span><br>')
 
         has_content = False
-        pentest = data.get("pentest_suggestions", {})
+
+        # ── PentestGPT ──
+        pentest = self._unwrap_raw(data.get("pentest_suggestions", {}))
         if pentest and not pentest.get("error"):
             has_content = True
-            _append_heading("PentestGPT 漏洞分析")
+            _heading("PentestGPT 漏洞分析")
 
             summary = pentest.get("summary", "")
             if summary:
-                _append_line(f'<span style="color:#f9e2af">{summary}</span>')
+                _line(f'{summary}')
+                _line("")
 
             findings = pentest.get("findings", [])
             if findings:
                 for i, f in enumerate(findings, 1):
-                    _append_line("")
                     if isinstance(f, dict):
                         name = f.get("name", f"发现 {i}")
                         sev = f.get("severity", "info")
-                        sev_zh = {"critical": "严重", "high": "高", "medium": "中", "low": "低"}.get(sev, sev)
+                        sev_zh = sev_zh_map.get(sev, sev)
                         color = sev_colors.get(sev, "#cdd6f4")
-                        _append_line(f'<span style="color:{color};font:bold;font-size:13px">■ [{sev_zh}] {name}</span>')
+                        icon = sev_icon.get(sev, "🔵")
+                        cursor.insertHtml(
+                            f'<span style="color:{color};font:bold;font-size:13px">'
+                            f'{icon} [{sev_zh}] {name}</span><br>')
                         desc = f.get("description", "")
                         if desc:
-                            _append_kv("描述", desc)
+                            _kv("描述", desc)
                         evidence = f.get("evidence", "")
                         if evidence:
-                            _append_kv("证据", str(evidence))
+                            _kv("证据", str(evidence))
                         risk = f.get("risk", "")
                         if risk:
-                            _append_kv("风险", risk, color)
+                            _kv("风险", risk, color)
                         remediation = f.get("remediation", "")
                         if remediation:
-                            _append_kv("修复建议", f'<span style="color:#a6e3a1">{remediation}</span>')
+                            _kv("修复建议", remediation, "#a6e3a1")
+                        _card_sep()
                     else:
-                        _append_line(f"  {i}. {f}")
+                        _line(f"  {i}. {f}")
 
             next_steps = pentest.get("next_steps", [])
             if next_steps:
-                _append_heading("建议下一步操作")
+                _heading("建议下一步操作")
                 for i, s in enumerate(next_steps, 1):
                     if isinstance(s, dict):
-                        _append_line(f"  {i}. {s.get('description', s)}")
+                        _line(f"  {i}. {s.get('description', s)}")
                     else:
-                        _append_line(f"  {i}. {s}")
+                        _line(f"  {i}. {s}")
 
             notes = pentest.get("notes", "")
             if notes:
-                _append_line("")
-                _append_kv("备注", f'<span style="color:#a6adc8">{notes}</span>')
+                _line("")
+                _kv("备注", notes, "#a6adc8")
 
-        chain = data.get("attack_chain", {})
+        # ── Shannon ──
+        chain = self._unwrap_raw(data.get("attack_chain", {}))
         if chain and not chain.get("error"):
             has_content = True
-            _append_heading("Shannon 攻击链规划")
+            _heading("Shannon 攻击链规划")
             chain_id = chain.get("chain_id", "")
             if chain_id:
-                _append_kv("攻击链编号", chain_id)
+                _kv("攻击链编号", chain_id, "#89b4fa")
             steps = chain.get("steps", [])
             if steps:
-                _append_line("")
+                _line("")
                 for i, s in enumerate(steps, 1):
                     action = s.get("action", "")
                     tool = s.get("tool", "")
                     desc = s.get("description", "")
                     risk = s.get("risk_level", "中")
                     color = sev_colors.get(risk, "#cdd6f4")
-                    risk_zh = {"critical": "严重", "high": "高", "medium": "中", "low": "低",
-                               "严重": "严重", "高": "高", "中": "中", "低": "低"}.get(risk, risk)
-                    _append_line(f'<span style="color:{color};font:bold">第{i}步</span>  '
-                                 f'<span style="color:#cdd6f4">{action}</span>  '
-                                 f'<span style="color:#89b4fa">[{tool}]</span>')
+                    risk_zh = sev_zh_map.get(risk, risk)
+                    icon = sev_icon.get(risk, "🟡")
+                    cursor.insertHtml(
+                        f'<span style="color:{color};font:bold;font-size:13px">第{i}步</span>'
+                        f'<span style="color:#cdd6f4;font-size:13px">  {action}</span>'
+                        f'<span style="color:#89b4fa;font-size:13px">  [{tool}]</span><br>')
                     if desc:
-                        _append_line(f'    <span style="color:#a6adc8">{desc}</span>')
-                    _append_line(f'    <span style="color:{color}">风险等级：{risk_zh}</span>')
-                    _append_line("")
+                        cursor.insertHtml(
+                            f'<span style="color:#a6adc8;font-size:12px">    {desc}</span><br>')
+                    cursor.insertHtml(
+                        f'<span style="color:{color};font-size:12px">    '
+                        f'{icon} 风险等级：{risk_zh}</span><br><br>')
 
         if not has_content:
-            _append_line("暂无 AI 建议。")
+            _line("暂无 AI 建议。")
 
         # Populate summary
         scan = data.get("scan_results", {})
@@ -621,17 +677,37 @@ class AutoSecGUI(QMainWindow):
     def _populate_vuln_table(self, data: dict):
         analysis = self._analysis_payload(data)
         vulns = analysis.get("vulnerabilities", data.get("vulnerabilities", []))
+
+        # Deduplicate by (name, type)
+        seen = set()
+        unique_vulns = []
+        for v in vulns:
+            key = (v.get("name", ""), v.get("type", ""))
+            if key not in seen:
+                seen.add(key)
+                unique_vulns.append(v)
+        vulns = unique_vulns
+
+        sev_colors = {"critical": "#f38ba8", "high": "#fab387", "medium": "#f9e2af", "low": "#a6e3a1",
+                       "严重": "#f38ba8", "高": "#fab387", "中": "#f9e2af", "低": "#a6e3a1"}
+        sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢",
+                     "严重": "🔴", "高": "🟠", "中": "🟡", "低": "🟢"}
+        sev_zh = {"critical": "严重", "high": "高", "medium": "中", "low": "低",
+                   "严重": "严重", "高": "高", "中": "中", "低": "低"}
+
         self.vuln_table.setRowCount(len(vulns))
         for i, v in enumerate(vulns):
             self.vuln_table.setItem(i, 0, QTableWidgetItem(str(v.get("vuln_id", ""))))
             self.vuln_table.setItem(i, 1, QTableWidgetItem(str(v.get("name", ""))))
             self.vuln_table.setItem(i, 2, QTableWidgetItem(str(v.get("type", v.get("classification", "")))))
-            severity = str(v.get("severity", ""))
+
+            severity = str(v.get("severity", "info")).lower()
             score = v.get("risk_score", "")
 
-            sev_item = QTableWidgetItem(severity)
-            sev_colors = {"critical": "#f38ba8", "high": "#fab387", "medium": "#f9e2af", "low": "#a6e3a1"}
-            sev_item.setForeground(QColor(sev_colors.get(severity.lower(), "#cdd6f4")))
+            icon = sev_icon.get(severity, "🔵")
+            label = sev_zh.get(severity, severity)
+            sev_item = QTableWidgetItem(f"{icon} {label}")
+            sev_item.setForeground(QColor(sev_colors.get(severity, "#cdd6f4")))
             self.vuln_table.setItem(i, 3, sev_item)
 
             score_item = QTableWidgetItem(str(score))

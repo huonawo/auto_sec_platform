@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 import uuid
@@ -10,6 +11,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("shannon")
 
 app = FastAPI(title="Shannon Plugin", version="1.0.0")
+
+
+def _parse_json(text: str) -> dict:
+    """Strip markdown code fences and parse JSON from LLM response."""
+    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+    return json.loads(cleaned)
 
 
 # -- LLM Client (reused from backend/ai/llm_client.py) -----------------------
@@ -140,8 +148,8 @@ def plan(req: PlanRequest):
         raise HTTPException(status_code=502, detail="LLM call failed")
 
     try:
-        parsed = json.loads(result)
-    except json.JSONDecodeError:
+        parsed = _parse_json(result)
+    except (json.JSONDecodeError, Exception):
         parsed = {"raw_response": result}
 
     chain_id = parsed.get("chain_id", f"chain-{uuid.uuid4().hex[:8]}")
@@ -169,8 +177,8 @@ def execute(req: ExecuteRequest):
         raise HTTPException(status_code=502, detail="LLM call failed")
 
     try:
-        parsed = json.loads(result)
-    except json.JSONDecodeError:
+        parsed = _parse_json(result)
+    except (json.JSONDecodeError, Exception):
         parsed = {"raw_response": result}
 
     return {"status": "ok", "execution": parsed}
