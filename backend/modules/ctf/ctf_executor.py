@@ -225,21 +225,61 @@ class CTFExecutor:
             return flag
         return None
 
-    def load_skills(self, category: str) -> str:
-        """Load CTF skill markdown for the given category as context."""
-        skill_path = os.path.join(SKILLS_DIR, f"ctf-{category}", "SKILL.md")
-        if not os.path.isfile(skill_path):
+    def load_skills(self, category: str, max_chars: int = 12000) -> str:
+        """Load SKILL.md + companion files for the given category.
+
+        Parses markdown links [text](file.md) from the index SKILL.md
+        and loads companion files within the character budget.
+        """
+        skill_dir = os.path.join(SKILLS_DIR, f"ctf-{category}")
+        index_path = os.path.join(skill_dir, "SKILL.md")
+
+        if not os.path.isfile(index_path):
             fallback = os.path.join(SKILLS_DIR, "solve-challenge", "SKILL.md")
             if os.path.isfile(fallback):
-                skill_path = fallback
+                index_path = fallback
+                skill_dir = os.path.dirname(fallback)
             else:
                 return ""
+
         try:
-            with open(skill_path, "r", encoding="utf-8") as f:
-                return f.read()
+            with open(index_path, "r", encoding="utf-8") as f:
+                index_content = f.read()
         except Exception as e:
-            logger.warning("Failed to load skill %s: %s", skill_path, e)
+            logger.warning("Failed to load skill %s: %s", index_path, e)
             return ""
+
+        # Extract companion .md file references from markdown links
+        companions = re.findall(r'\[.*?\]\(([^)]+\.md)\)', index_content)
+
+        # Load companion files within budget, skip duplicates
+        loaded = index_content
+        seen = {os.path.basename(index_path)}
+        for companion in companions:
+            companion_name = os.path.basename(companion)
+            if companion_name in seen:
+                continue
+            seen.add(companion_name)
+            companion_path = os.path.join(skill_dir, companion_name)
+            if not os.path.isfile(companion_path):
+                continue
+            try:
+                with open(companion_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+            if len(loaded) + len(content) <= max_chars:
+                loaded += f"\n\n--- {companion_name} ---\n{content}"
+            else:
+                # Try to fit a truncated version
+                remaining = max_chars - len(loaded) - len(companion_name) - 20
+                if remaining > 500:
+                    loaded += f"\n\n--- {companion_name} ---\n{content[:remaining]}..."
+                break
+
+        logger.info("[CTF Executor] Loaded skill '%s': %d chars, %d companions",
+                    category, len(loaded), len(seen) - 1)
+        return loaded
 
     def execute_steps(self, steps: list[dict]) -> list[dict]:
         """Execute a list of Shannon step objects, running each step's commands."""

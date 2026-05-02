@@ -34,6 +34,12 @@ class AgentState:
     tried_commands: set = field(default_factory=set)
     current_hypothesis: str = "unknown"
     failed_strategies: list[str] = field(default_factory=list)
+    # HTTP-aware fields
+    http_headers: dict = field(default_factory=dict)
+    html_comments: list[str] = field(default_factory=list)
+    form_fields: dict = field(default_factory=dict)
+    redirect_chain: list[str] = field(default_factory=list)
+    challenge_types: list[str] = field(default_factory=list)
 
     def to_prompt_dict(self) -> dict:
         data = asdict(self)
@@ -41,8 +47,43 @@ class AgentState:
         return data
 
 
+# ── Challenge Type Detection ────────────────────────────────────────────────
+
+_CHALLENGE_PATTERNS: dict[str, list[str]] = {
+    "header_injection": ["header", "inject", "X-Forwarded", "X-Real-IP", "Referer", "X-Forwarded-Host"],
+    "cookie_forgery": ["cookie", "session", "forgery", "flask", "werkzeug", "signed", "role=admin"],
+    "ssti": ["template", "jinja", "twig", "erb", "{{", "mako", "SSTI", "smarty"],
+    "sqli": ["sql", "database", "mysql", "postgres", "inject", "query", "SELECT", "UNION", "sqlite"],
+    "ssrf": ["SSRF", "internal", "metadata", "169.254", "localhost", "gopher", "dict://"],
+    "xss": ["XSS", "script", "reflect", "DOM", "alert(", "onerror", "onload"],
+    "lfi": ["LFI", "file read", "include", "path traversal", "../", "php://filter", "passwd"],
+    "jwt": ["JWT", "jsonwebtoken", "alg", "HS256", "RS256", "bearer", "eyJ"],
+    "deserializ": ["deserial", "pickle", "marshal", "PHP unserialize", "yaml.load"],
+    "command_inject": ["command", "inject", "shell", "exec", "system(", "passthru", "popen"],
+    "base64": ["base64", "编码", "encode", "decode"],
+}
+
+
+def detect_challenge_type(description: str, round1_output: str = "") -> list[str]:
+    """Detect challenge types from description and first-round output."""
+    text = (description + " " + round1_output).lower()
+    detected = []
+    for ctype, keywords in _CHALLENGE_PATTERNS.items():
+        if any(kw.lower() in text for kw in keywords):
+            detected.append(ctype)
+    return detected or ["unknown"]
+
+
 def extract_and_update(output: str, state: AgentState) -> AgentState:
+    """Extract structured information from command output and append to state.
+
+    Extracts: base64 candidates, JS vars, URLs, cookies, error patterns,
+    HTTP headers, HTML comments, hidden form fields, redirect chains.
+    This function is additive — only appends, never clears.
+    """
     output = output or ""
+
+    # 1. Base64 candidates
     for candidate in _STATE_BASE64_RE.findall(output):
         if candidate not in state.base64_candidates:
             state.base64_candidates.append(candidate)
@@ -60,9 +101,11 @@ def extract_and_update(output: str, state: AgentState) -> AgentState:
             except Exception:
                 pass
 
+    # 2. JS variable assignments
     for name, value in _JS_VAR_RE.findall(output):
         state.js_variables[name] = value
 
+    # 3. URLs and status codes
     status_matches = _STATUS_RE.findall(output)
     inferred_status = int(status_matches[-1]) if status_matches else None
     for url in _URL_RE.findall(output):
@@ -72,13 +115,46 @@ def extract_and_update(output: str, state: AgentState) -> AgentState:
         if inferred_status is not None:
             state.endpoints_tried[clean_url] = inferred_status
 
+    # 4. Cookies (Set-Cookie and Cookie headers)
     cookie_match = re.findall(r"(?:set-cookie:|cookie:)\s*([^;\r\n=]+)=([^;\r\n]+)", output, re.IGNORECASE)
     for name, value in cookie_match:
         state.cookies[name.strip()] = value.strip()
 
+    # 5. Error patterns
     for keyword in _ERROR_KEYWORDS:
         if keyword in output and keyword not in state.error_patterns:
             state.error_patterns.append(keyword)
+
+    # 6. HTTP response headers (X-*, Server, Content-Type, Location, etc.)
+    header_matches = re.findall(
+        r'^(X-[\w-]+|Set-Cookie|Location|Server|Content-Type|X-Powered-By|WWW-Authenticate):\s*(.+)',
+        output, re.MULTILINE | re.IGNORECASE,
+    )
+    for name, val in header_matches:
+        state.http_headers[name.strip()] = val.strip()
+
+    # 7. HTML comments
+    comments = re.findall(r'<!--(.*?)-->', output, re.DOTALL)
+    for c in comments:
+        stripped = c.strip()
+        if stripped and stripped not in state.html_comments:
+            state.html_comments.append(stripped)
+
+    # 8. Hidden form fields
+    forms = re.findall(r'<input[^>]*type=["\']hidden["\'][^>]*>', output, re.IGNORECASE)
+    for f in forms:
+        name_m = re.search(r'name=["\']([^"\']+)', f)
+        val_m = re.search(r'value=["\']([^"\']+)', f)
+        if name_m:
+            state.form_fields[name_m.group(1)] = val_m.group(1) if val_m else ""
+
+    # 9. Redirect chains (Location headers)
+    redirects = re.findall(r'Location:\s*(\S+)', output, re.IGNORECASE)
+    for r in redirects:
+        clean = r.strip()
+        if clean not in state.redirect_chain:
+            state.redirect_chain.append(clean)
+
     return state
 
 
@@ -151,26 +227,102 @@ class CTFAgent:
         return history
 
     def _state_prompt(self, force_new_direction: bool = False) -> str:
-        state_data = self.state.to_prompt_dict()
+        s = self.state
+        parts = [
+            "=== 目标 ===",
+            f"URL: {self.url}",
+            f"描述: {self.description}",
+            "=== 已知信息（勿重复探测）===",
+        ]
+        if s.challenge_types and s.challenge_types != ["unknown"]:
+            parts.append(f"已识别题型: {s.challenge_types}")
+        if s.base64_candidates:
+            parts.append(f"Base64候选 ({len(s.base64_candidates)}): {s.base64_candidates[-10:]}")
+        if s.decoded_results:
+            parts.append(f"解码结果: {s.decoded_results[-10:]}")
+        if s.js_variables:
+            parts.append(f"JS变量: {s.js_variables}")
+        if s.http_headers:
+            parts.append(f"HTTP响应头: {s.http_headers}")
+        if s.html_comments:
+            parts.append(f"HTML注释: {s.html_comments}")
+        if s.form_fields:
+            parts.append(f"表单字段: {s.form_fields}")
+        if s.redirect_chain:
+            parts.append(f"重定向链: {s.redirect_chain}")
+        if s.cookies:
+            parts.append(f"Cookies: {s.cookies}")
+        if s.endpoints_tried:
+            parts.append(f"已试端点: {s.endpoints_tried}")
+        if s.error_patterns:
+            parts.append(f"错误模式: {s.error_patterns}")
+        if s.failed_strategies:
+            parts.append(f"失败策略: {s.failed_strategies}")
+        if s.current_hypothesis and s.current_hypothesis != "unknown":
+            parts.append(f"当前假设: {s.current_hypothesis}")
+
+        parts.append("=== 本轮目标 ===")
+        parts.append("基于已知信息推进，不要重复已失败的命令。")
+        if s.base64_candidates:
+            parts.append("若发现 base64 候选未解码，exact_commands 必须包含解码命令。")
+        if s.js_variables:
+            parts.append("若 JS 变量中有疑似密码/token，必须尝试使用。")
+        if s.http_headers:
+            parts.append("根据响应头信息调整攻击策略。")
         if force_new_direction:
-            state_data["directive"] = "当前策略已穷尽，必须尝试全新方向"
-        return (
-            "=== 目标 ===\n"
-            f"URL: {self.url}\n"
-            f"描述: {self.description}\n"
-            "=== 已知信息（勿重复探测）===\n"
-            f"Base64候选: {state_data['base64_candidates']}\n"
-            f"解码结果: {state_data['decoded_results']}\n"
-            f"JS变量: {state_data['js_variables']}\n"
-            f"已试端点: {state_data['endpoints_tried']}\n"
-            f"失败策略: {state_data['failed_strategies']}\n"
-            f"当前假设: {state_data['current_hypothesis']}\n"
-            "=== 本轮目标 ===\n"
-            "基于已知信息推进，不要重复已失败的命令。\n"
-            "若发现 base64 候选未解码，exact_commands 必须包含解码命令。\n"
-            "若 JS 变量中有疑似密码/token，必须尝试使用。"
-            + (f"\n{state_data['directive']}" if state_data.get("directive") else "")
-        )
+            parts.append("当前策略已穷尽，必须尝试全新方向。")
+
+        return "\n".join(parts)
+
+    def _type_specific_recon(self, challenge_types: list[str]) -> list[str]:
+        """Generate challenge-type specific recon commands."""
+        cmds = []
+        url = self.url
+
+        if "cookie_forgery" in challenge_types or "jwt" in challenge_types:
+            cmds.append(f"curl -s -k -v {url} 2>&1 | grep -iE 'set-cookie|jwt|token|session|authorization'")
+            cmds.append(f"curl -s -k -b 'admin=true' {url}")
+            cmds.append(f"curl -s -k -b 'role=admin' {url}")
+            cmds.append(f"curl -s -k -H 'Authorization: Bearer eyJ0ZXN0IjoiYWRtaW4ifQ.signature' {url}")
+
+        if "header_injection" in challenge_types:
+            cmds.append(f"curl -s -k -H 'X-Forwarded-For: 127.0.0.1' {url}")
+            cmds.append(f"curl -s -k -H 'X-Forwarded-Host: localhost' {url}")
+            cmds.append(f"curl -s -k -H 'X-Real-IP: 127.0.0.1' {url}")
+            cmds.append(f"curl -s -k -H 'Referer: http://admin.local' {url}")
+
+        if "ssti" in challenge_types:
+            cmds.append(f"curl -s -k '{url}?name={{{{7*7}}}}'")
+            cmds.append(f"curl -s -k '{url}?input={{{{config}}}}'")
+            cmds.append(f"curl -s -k '{url}?page={{{{self.__class__.__mro__[1].__subclasses__()}}}}'")
+
+        if "sqli" in challenge_types:
+            cmds.append(f"curl -s -k \"{url}?id=1'\"")
+            cmds.append(f"curl -s -k \"{url}?id=1 OR 1=1--\"")
+            cmds.append(f"curl -s -k \"{url}?id=1 UNION SELECT 1,2,3--\"")
+
+        if "ssrf" in challenge_types:
+            cmds.append(f"curl -s -k '{url}?url=http://127.0.0.1'")
+            cmds.append(f"curl -s -k '{url}?url=http://169.254.169.254/latest/meta-data/'")
+            cmds.append(f"curl -s -k '{url}?url=gopher://127.0.0.1:6379/_INFO'")
+
+        if "xss" in challenge_types:
+            cmds.append(f"curl -s -k '{url}?input=<script>alert(1)</script>'")
+            cmds.append(f"curl -s -k '{url}?q=\\\"><img src=x onerror=alert(1)>'")
+
+        if "lfi" in challenge_types:
+            cmds.append(f"curl -s -k '{url}?file=../../../etc/passwd'")
+            cmds.append(f"curl -s -k '{url}?page=php://filter/convert.base64-encode/resource=index'")
+            cmds.append(f"curl -s -k '{url}?include=....//....//....//etc/passwd'")
+
+        if "command_inject" in challenge_types:
+            cmds.append(f"curl -s -k '{url}?cmd=id'")
+            cmds.append(f"curl -s -k '{url}?host=127.0.0.1;id'")
+
+        if "deserializ" in challenge_types:
+            cmds.append(f"curl -s -k '{url}' -v 2>&1 | grep -iE 'pickle|marshal|serialize|java|php'")
+
+        return cmds[:8]
 
     def _state_flag(self) -> str | None:
         for result in self.state.decoded_results:
@@ -488,13 +640,38 @@ class CTFAgent:
                     parts.append(f"*** FLAG FOUND: {out['flag']} ***")
         return "\n".join(parts) if parts else "No output"
 
+    def _dedup_commands(self, commands: list[str]) -> list[str]:
+        """Filter out already-tried commands. Returns only new ones."""
+        new_commands = []
+        for cmd in commands:
+            normalized = cmd.strip()
+            if normalized and normalized not in self.state.tried_commands:
+                new_commands.append(normalized)
+        return new_commands
+
+    def _check_decoded_flags(self) -> str | None:
+        """Check all decoded base64 results for flags. Returns first match or None."""
+        for result in self.state.decoded_results:
+            if result["is_flag"]:
+                decoded = result.get("decoded", "")
+                match = _FLAG_RE.search(decoded)
+                return match.group(0) if match else decoded
+        return None
+
     def solve(self):
         """Generator that yields per-round results for streaming.
+
+        Four-step loop per round:
+          Step 1: extract_and_update — parse output into AgentState
+          Step 2: base64 decode check — try all candidates, early flag return
+          Step 3: PentestGPT with state summary — inject cumulative knowledge
+          Step 4: command dedup + execute — filter tried commands, run new ones
 
         Yields dicts with keys: type, round, thought, action, observation, flag
         """
         self._load_skills()
         reasoning_start_round = 1
+
         if self.category == "web":
             recon = self._collect_initial_web_context()
             yield {
@@ -509,6 +686,14 @@ class CTFAgent:
                 "result_file": None,
             }
             classification = self._classify_web_context()
+
+            # Detect challenge types from classification
+            detected = [classification.get("category", "unknown")]
+            for sec in classification.get("secondary_categories", []):
+                if sec.get("score", 0) >= 0.2:
+                    detected.append(sec["category"])
+            self.state.challenge_types = detected
+
             yield {
                 "type": "classification",
                 "round": 1,
@@ -529,17 +714,55 @@ class CTFAgent:
             log.append(f"{'═' * 50}")
             logger.info("[CTF Agent] === Round %d/%d ===", round_num, self.max_rounds)
 
-            # ── Step 1: PentestGPT (with skill knowledge + history) ──
+            # ── Step 1: Extract & update state from previous round ──
+            if self.history:
+                prev_output = self.history[-1].get("observation_summary", "")
+                log.append("")
+                log.append("── Step 1: State Extraction ──")
+                extract_and_update(prev_output, self.state)
+
+                # Detect challenge types from first round output
+                if round_num == reasoning_start_round + 1 and not self.state.challenge_types:
+                    self.state.challenge_types = detect_challenge_type(
+                        self.description, prev_output
+                    )
+                    log.append(f"Detected challenge types: {self.state.challenge_types}")
+
+                log.append(f"Base64 candidates: {len(self.state.base64_candidates)}")
+                if self.state.http_headers:
+                    log.append(f"HTTP headers: {list(self.state.http_headers.keys())}")
+                if self.state.html_comments:
+                    log.append(f"HTML comments: {len(self.state.html_comments)}")
+                if self.state.cookies:
+                    log.append(f"Cookies: {list(self.state.cookies.keys())}")
+
+                # ── Step 2: Check decoded base64 for flags ──
+                decoded_flag = self._check_decoded_flags()
+                if decoded_flag:
+                    log.append(f"FLAG FOUND in decoded base64: {decoded_flag}")
+                    full_observation = "\n".join(log)
+                    result_file = self._save_result("flag_found", decoded_flag)
+                    yield {
+                        "type": "round", "round": round_num,
+                        "thought": "Flag found in decoded base64",
+                        "action": "base64 decode",
+                        "observation": full_observation,
+                        "flag": decoded_flag,
+                        "status": "flag_found",
+                        "result_file": result_file,
+                    }
+                    return
+
+            # ── Step 3: PentestGPT with state summary ──
             log.append("")
-            log.append("── Step 1: PentestGPT Analysis ──")
+            log.append("── Step 3: PentestGPT Analysis ──")
             analysis = self._call_pentestgpt()
             thought_summary = self._extract_thought_summary(analysis)
-            self.tried_methods.add(thought_summary[:100])
             log.append(thought_summary)
 
-            # ── Step 2: Extract commands from PentestGPT ──
+            # ── Step 4: Command Planning ──
             log.append("")
-            log.append("── Step 2: Command Planning ──")
+            log.append("── Step 4: Command Planning ──")
 
             pentestgpt_commands = analysis.get("exact_commands", [])
             if not pentestgpt_commands:
@@ -548,39 +771,80 @@ class CTFAgent:
             else:
                 source = "PentestGPT exact_commands"
 
-            # Non-web categories keep the older first-round command seeding.
-            if self.category != "web" and round_num == 1:
-                if self._is_base64_challenge():
-                    recon = self._base64_recon_commands()
-                    source = "PentestGPT + Base64 Recon"
-                else:
-                    recon = self._recon_commands()
-                    source = "PentestGPT + Recon"
-                recon = self._merge_commands(recon, self._active_probe_commands())
-                pentestgpt_commands = self._merge_commands(pentestgpt_commands, recon)
+            # First reasoning round: add recon commands
+            if round_num == reasoning_start_round:
+                if self.category != "web":
+                    if self._is_base64_challenge():
+                        recon = self._base64_recon_commands()
+                        source = "PentestGPT + Base64 Recon"
+                    else:
+                        recon = self._recon_commands()
+                        source = "PentestGPT + Recon"
+                    recon = self._merge_commands(recon, self._active_probe_commands())
+                    pentestgpt_commands = self._merge_commands(pentestgpt_commands, recon)
+
+                # Add type-specific recon if challenge types detected
+                if self.state.challenge_types and self.state.challenge_types != ["unknown"]:
+                    type_cmds = self._type_specific_recon(self.state.challenge_types)
+                    if type_cmds:
+                        pentestgpt_commands = self._merge_commands(pentestgpt_commands, type_cmds)
+                        source += " + Type-Specific Recon"
+                        log.append(f"Added {len(type_cmds)} type-specific recon commands for: {self.state.challenge_types}")
 
             log.append(f"Source: {source}")
             log.append(f"PentestGPT generated {len(pentestgpt_commands)} command(s)")
 
-            # ── Step 3: Shannon review and optimize ──
+            # Shannon review
             log.append("")
-            log.append("── Step 3: Shannon Review ──")
-            log.append("Calling Shannon /review ...")
-
+            log.append("── Shannon Review ──")
             context = f"Round {round_num}, category: {self.category}"
+            if self.state.challenge_types:
+                context += f", types: {self.state.challenge_types}"
             if analysis.get("hypothesis"):
                 context += f", hypothesis: {analysis['hypothesis']}"
-            final_commands = self._call_shannon_review(pentestgpt_commands, context)
+            reviewed_commands = self._call_shannon_review(pentestgpt_commands, context)
+
+            # ── Step 5: Command dedup + execute ──
+            log.append("")
+            log.append("── Step 5: Execution ──")
+            final_commands = self._dedup_commands(reviewed_commands)
+
+            if not final_commands:
+                self.state.failed_strategies.append(
+                    analysis.get("hypothesis", self.state.current_hypothesis)
+                )
+                log.append("All commands already tried — strategy exhausted")
+                self.state.current_hypothesis = "策略已穷尽，必须尝试全新方向"
+                full_observation = "\n".join(log)
+                self.history.append({
+                    "round": round_num,
+                    "thought": thought_summary,
+                    "action": "",
+                    "observation": full_observation,
+                    "observation_summary": "All commands already tried",
+                    "commands": [],
+                    "hypothesis": self.state.current_hypothesis,
+                    "flag": None,
+                })
+                yield {
+                    "type": "round", "round": round_num,
+                    "thought": thought_summary,
+                    "action": "",
+                    "observation": full_observation,
+                    "flag": None,
+                    "status": "continuing",
+                    "result_file": None,
+                }
+                continue
+
+            # Register commands as tried
+            self.state.tried_commands.update(final_commands)
 
             action_summary = self._extract_action_summary(final_commands, source)
-            log.append(f"Final commands after review: {len(final_commands)}")
+            log.append(f"Final commands after dedup: {len(final_commands)}")
             log.append(action_summary)
 
-            # ── Step 4: Execute ──
-            log.append("")
-            log.append("── Step 4: Command Execution ──")
-            log.append(f"Running in auto_sec_kali ...")
-
+            # Execute
             steps = [{"step_id": "ctf-step", "action": source, "commands": final_commands}]
             step_results = self.executor.execute_steps(steps)
             observation_summary = self._extract_observation_summary(step_results)
@@ -589,44 +853,53 @@ class CTFAgent:
             log.append(f"Executed {exec_count} command(s):")
             log.append(observation_summary)
 
-            # ── Step 5: Flag check ──
-            log.append("")
-            log.append("── Step 5: Flag Detection ──")
-            flag = None
+            # Extract state from execution output
+            for sr in step_results:
+                for out in sr.get("outputs", []):
+                    stdout = out.get("stdout", "")
+                    stderr = out.get("stderr", "")
+                    extract_and_update(stdout + "\n" + stderr, self.state)
+
+            # Check decoded flags
+            decoded_flag = self._check_decoded_flags()
+            if decoded_flag:
+                log.append(f"FLAG FOUND in decoded base64: {decoded_flag}")
+
+            # ── Flag check from execution ──
+            exec_flag = None
             for sr in step_results:
                 if sr.get("flag"):
-                    flag = sr["flag"]
+                    exec_flag = sr["flag"]
                     break
+
+            flag = exec_flag or decoded_flag
 
             if flag:
                 log.append(f"FLAG FOUND: {flag}")
             else:
                 log.append("No flag in command output")
 
-            # Build observation for GUI display and PentestGPT history
+            # Update hypothesis
+            if not flag and observation_summary != "No output":
+                self.state.current_hypothesis = (
+                    f"Round {round_num}: "
+                    f"{analysis.get('hypothesis', '')}. "
+                    f"Results: {observation_summary[:500]}. "
+                    f"Need to try different approaches."
+                )
+
             full_observation = "\n".join(log)
 
-            # Record history — no truncation, store everything
-            round_record = {
+            self.history.append({
                 "round": round_num,
                 "thought": thought_summary,
                 "action": action_summary,
                 "observation": full_observation,
                 "observation_summary": observation_summary,
                 "commands": final_commands,
-                "hypothesis": analysis.get("hypothesis", self.current_hypothesis),
+                "hypothesis": analysis.get("hypothesis", self.state.current_hypothesis),
                 "flag": flag,
-            }
-            self.history.append(round_record)
-
-            # Update hypothesis
-            if not flag and observation_summary != "No output":
-                self.current_hypothesis = (
-                    f"Round {round_num}: "
-                    f"{analysis.get('hypothesis', '')}. "
-                    f"Results: {observation_summary[:500]}. "
-                    f"Need to try different approaches."
-                )
+            })
 
             result_file = self._save_result("flag_found", flag) if flag else None
             yield {
