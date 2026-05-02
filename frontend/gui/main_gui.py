@@ -768,19 +768,6 @@ class AutoSecGUI(QMainWindow):
         if not has_content:
             _line("暂无 AI 建议。")
 
-        # Populate summary
-        scan = data.get("scan_results", {})
-        summary_data = {
-            "target": target,
-            "scan_type": "auto_pentest",
-            "status": status,
-            "result": scan,
-            **ai,
-        }
-        self._populate_summary(summary_data)
-
-        self.status_bar.showMessage("Auto pentest completed")
-
     def _on_api_error(self, err: str):
         self.scan_btn.setEnabled(True)
         self.ai_btn.setEnabled(True)
