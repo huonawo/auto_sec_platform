@@ -58,12 +58,17 @@ class CTFAgent:
             record = {
                 "round": h.get("round", 0),
                 "commands": h.get("commands", []),
-                "observation_summary": h.get("observation_summary", "")[:500],
+                "observation_summary": h.get("observation_summary", "")[:2000],
                 "hypothesis": h.get("hypothesis", ""),
                 "flag_found": bool(h.get("flag")),
             }
             history.append(record)
         return history
+
+    def _is_base64_challenge(self) -> bool:
+        """Check if this is a base64-themed challenge."""
+        desc_lower = self.description.lower()
+        return "base64" in desc_lower or "编码" in desc_lower or "encode" in desc_lower
 
     def _recon_commands(self) -> list[str]:
         """Round 1 fixed recon commands."""
@@ -71,6 +76,23 @@ class CTFAgent:
             f"curl -s -k {self.url}",
             f"curl -sI -k {self.url}",
             f"curl -s -k {self.url} | grep -i base64",
+        ]
+
+    def _base64_recon_commands(self) -> list[str]:
+        """Round 1 recon commands specialized for base64 challenges."""
+        decode_script = (
+            "import sys,re,base64;"
+            "content=sys.stdin.read();"
+            "print('=== FULL SOURCE ===');"
+            "print(content[:3000]);"
+            "strings=re.findall(r'[A-Za-z0-9+/]{20,}={0,2}',content);"
+            "print('=== BASE64 CANDIDATES ===');"
+            "[print(s+' -> '+base64.b64decode(s+'==').decode('utf-8',errors='ignore')) for s in strings]"
+        )
+        return [
+            f"curl -s -k {self.url} | python3 -c '{decode_script}'",
+            f"curl -sI -k {self.url}",
+            f"curl -s -k {self.url} | grep -oP '<!--.*?-->'",
         ]
 
     def _merge_commands(self, primary: list[str], secondary: list[str]) -> list[str]:
@@ -281,7 +303,7 @@ class CTFAgent:
                     parts.append(f"$ {cmd}")
                 parts.append(f"[exit code: {rc}]")
                 if stdout:
-                    truncated = stdout[:8000] + ("..." if len(stdout) > 8000 else "")
+                    truncated = stdout[:20000] + ("..." if len(stdout) > 20000 else "")
                     parts.append(truncated)
                 if stderr:
                     parts.append(f"[stderr] {stderr[:3000]}")
@@ -326,9 +348,13 @@ class CTFAgent:
 
             # Round 1: merge with fixed recon commands
             if round_num == 1:
-                recon = self._recon_commands()
+                if self._is_base64_challenge():
+                    recon = self._base64_recon_commands()
+                    source = "PentestGPT + Base64 Recon"
+                else:
+                    recon = self._recon_commands()
+                    source = "PentestGPT + Recon"
                 pentestgpt_commands = self._merge_commands(pentestgpt_commands, recon)
-                source = "PentestGPT + Recon"
 
             log.append(f"Source: {source}")
             log.append(f"PentestGPT generated {len(pentestgpt_commands)} command(s)")
