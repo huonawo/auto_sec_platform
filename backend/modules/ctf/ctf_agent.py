@@ -55,10 +55,12 @@ class CTFAgent:
         """Build structured history list for PentestGPT context."""
         history = []
         for h in self.history[-5:]:
+            # Use full observation output, not the truncated summary
+            obs = h.get("observation", "") or h.get("observation_summary", "")
             record = {
                 "round": h.get("round", 0),
                 "commands": h.get("commands", []),
-                "observation_summary": h.get("observation_summary", "")[:2000],
+                "observation": obs[:10000],
                 "hypothesis": h.get("hypothesis", ""),
                 "flag_found": bool(h.get("flag")),
             }
