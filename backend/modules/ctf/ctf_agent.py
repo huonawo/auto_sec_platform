@@ -384,9 +384,7 @@ class CTFAgent:
 
             exec_count = sum(len(sr.get("outputs", [])) for sr in step_results)
             log.append(f"Executed {exec_count} command(s):")
-            log.append(observation_summary[:2000])
-            if len(observation_summary) > 2000:
-                log.append("  ... (truncated)")
+            log.append(observation_summary)
 
             # ── Step 5: Flag check ──
             log.append("")
@@ -411,7 +409,7 @@ class CTFAgent:
                 "thought": thought_summary,
                 "action": action_summary,
                 "observation": full_observation,
-                "observation_summary": observation_summary[:500],
+                "observation_summary": observation_summary[:5000],
                 "commands": final_commands,
                 "hypothesis": analysis.get("hypothesis", self.current_hypothesis),
                 "flag": flag,
@@ -423,7 +421,7 @@ class CTFAgent:
                 self.current_hypothesis = (
                     f"Round {round_num}: "
                     f"{analysis.get('hypothesis', '')}. "
-                    f"Results: {observation_summary[:200]}. "
+                    f"Results: {observation_summary[:500]}. "
                     f"Need to try different approaches."
                 )
 
