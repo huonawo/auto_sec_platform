@@ -1,0 +1,67 @@
+  % Total    % Received % Xferd  Average Speed  Time    Time    Time   Current
+                                 Dload  Upload  Total   Spent   Left   Speed
+  0      0   0      0   0      0      0      0                              0  0      0   0      0   0      0      0      0           00:01              0* Host 73c3a1ea-d31b-4caf-86c2-71e768862510.challenge.ctf.show:443 was resolved.
+* IPv6: (none)
+* IPv4: 124.223.158.81
+*   Trying 124.223.158.81:443...
+* ALPN: curl offers h2,http/1.1
+} [5 bytes data]
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+} [1734 bytes data]
+* SSL Trust: peer verification disabled
+{ [5 bytes data]
+* TLSv1.3 (IN), TLS handshake, Server hello (2):
+{ [122 bytes data]
+* TLSv1.3 (IN), TLS change cipher, Change cipher spec (1):
+{ [1 bytes data]
+* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+{ [25 bytes data]
+* TLSv1.3 (IN), TLS handshake, Certificate (11):
+{ [950 bytes data]
+* TLSv1.3 (IN), TLS handshake, CERT verify (15):
+{ [79 bytes data]
+* TLSv1.3 (IN), TLS handshake, Finished (20):
+{ [52 bytes data]
+* TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
+} [1 bytes data]
+* TLSv1.3 (OUT), TLS handshake, Finished (20):
+} [52 bytes data]
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / x25519 / id-ecPublicKey
+* ALPN: server accepted http/1.1
+* Server certificate:
+*   subject: CN=challenge.ctf.show
+*   start date: Feb  3 15:01:41 2026 GMT
+*   expire date: May  4 15:01:40 2026 GMT
+*   issuer: C=US; O=Let's Encrypt; CN=E7
+*   Certificate level 0: Public key type EC/prime256v1 (256/128 Bits/secBits), signed using ecdsa-with-SHA384
+* OpenSSL verify result: 14
+*  SSL certificate verification failed, continuing anyway!
+* Established connection to 73c3a1ea-d31b-4caf-86c2-71e768862510.challenge.ctf.show (124.223.158.81 port 443) from 172.18.0.3 port 38616 
+* using HTTP/1.x
+} [5 bytes data]
+> GET / HTTP/1.1
+> Host: 73c3a1ea-d31b-4caf-86c2-71e768862510.challenge.ctf.show
+> User-Agent: curl/8.19.0
+> Accept: */*
+> 
+* Request completely sent off
+{ [5 bytes data]
+* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+{ [57 bytes data]
+* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+{ [57 bytes data]
+< HTTP/1.1 200 OK
+< Server: nginx/1.20.1
+< Date: Fri, 01 May 2026 17:23:01 GMT
+< Content-Type: text/html; charset=UTF-8
+< Transfer-Encoding: chunked
+< Connection: keep-alive
+< Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+< Access-Control-Allow-Credentials: true
+< Access-Control-Expose-Headers: Content-Type,Cookies,Aaa,Date,Server,Content-Length,Connection
+< Access-Control-Allow-Headers: DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization,x-auth-token,Cookies,Aaa,Date,Server,Content-Length,Connection
+< Access-Control-Max-Age: 1728000
+< 
+{ [3479 bytes data]
+100   3467   0   3467   0      0   2500      0           00:01           2500100   3467   0   3467   0      0   2500      0           00:01           2500100   3467   0   3467   0      0   2500      0           00:01           2500
+* Connection #0 to host 73c3a1ea-d31b-4caf-86c2-71e768862510.challenge.ctf.show:443 left intact

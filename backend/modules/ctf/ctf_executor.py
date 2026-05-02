@@ -1,6 +1,7 @@
 import os
 import re
 import glob
+import base64
 import logging
 import subprocess
 
@@ -8,8 +9,41 @@ logger = logging.getLogger(__name__)
 
 _FLAG_REGEX = re.compile(r"(?:flag|ctf|CTF|FLAG)\{[^}]{4,}\}", re.IGNORECASE)
 _PLACEHOLDER_FILTER = lambda f: re.match(r"^(?:flag|ctf)\{x+\}$", f, re.IGNORECASE)
+_CURL_NO_K = re.compile(r"^curl\b(?!.*\s-k\b)")
+_BASE64_REGEX = re.compile(r"\b[A-Za-z0-9+/]{20,}={0,2}\b")
 
 SKILLS_DIR = os.path.expanduser("~/.claude/skills/ctf-skills")
+
+
+def _preprocess_command(command: str) -> str:
+    """Auto-add -k to curl commands that don't already have it."""
+    if _CURL_NO_K.match(command.strip()):
+        command = command.strip().replace("curl ", "curl -k ", 1)
+        logger.debug("Auto-added -k to curl command: %s", command)
+    return command
+
+
+def _decode_base64_strings(text: str) -> str:
+    """Annotate base64-encoded strings in output with their decoded values."""
+    if not text:
+        return text
+
+    def _try_decode(match):
+        candidate = match.group(0)
+        # Skip if it looks like a file path or URL fragment
+        if "/" in candidate and not candidate.endswith("="):
+            return candidate
+        try:
+            decoded = base64.b64decode(candidate)
+            decoded_str = decoded.decode("utf-8")
+            # Only annotate if result is printable and meaningful
+            if decoded_str.isprintable() and len(decoded_str) >= 4:
+                return f"{candidate} [decoded: {decoded_str}]"
+        except Exception:
+            pass
+        return candidate
+
+    return _BASE64_REGEX.sub(_try_decode, text)
 
 
 class CTFExecutor:
@@ -20,6 +54,7 @@ class CTFExecutor:
 
     def execute(self, command: str) -> dict:
         """Run a command directly via subprocess."""
+        command = _preprocess_command(command)
         result = {
             "command": command,
             "stdout": "",
@@ -38,6 +73,10 @@ class CTFExecutor:
             result["stdout"] = proc.stdout
             result["stderr"] = proc.stderr
             result["returncode"] = proc.returncode
+
+            # Decode base64 strings in output
+            result["stdout"] = _decode_base64_strings(result["stdout"])
+            result["stderr"] = _decode_base64_strings(result["stderr"])
 
             flag = self.check_flag(proc.stdout) or self.check_flag(proc.stderr)
             if flag:
