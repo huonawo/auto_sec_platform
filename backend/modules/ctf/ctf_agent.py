@@ -52,15 +52,17 @@ class CTFAgent:
                         self.category, len(self.skills_context))
 
     def _build_history_for_pentestgpt(self) -> list[dict]:
-        """Build structured history list for PentestGPT context."""
+        """Build structured history list for PentestGPT context.
+
+        Passes full execution output without truncation so PentestGPT
+        can see complete command results including HTML source, headers, etc.
+        """
         history = []
         for h in self.history[-5:]:
-            # Use full observation output, not the truncated summary
-            obs = h.get("observation", "") or h.get("observation_summary", "")
             record = {
                 "round": h.get("round", 0),
                 "commands": h.get("commands", []),
-                "observation": obs[:10000],
+                "observation": h.get("observation_summary", ""),
                 "hypothesis": h.get("hypothesis", ""),
                 "flag_found": bool(h.get("flag")),
             }
@@ -293,7 +295,7 @@ class CTFAgent:
         return "\n".join(parts)
 
     def _extract_observation_summary(self, step_results: list[dict]) -> str:
-        """Extract a readable summary of execution results."""
+        """Extract full execution results without truncation."""
         parts = []
         for sr in step_results:
             for out in sr.get("outputs", []):
@@ -305,10 +307,9 @@ class CTFAgent:
                     parts.append(f"$ {cmd}")
                 parts.append(f"[exit code: {rc}]")
                 if stdout:
-                    truncated = stdout[:20000] + ("..." if len(stdout) > 20000 else "")
-                    parts.append(truncated)
+                    parts.append(stdout)
                 if stderr:
-                    parts.append(f"[stderr] {stderr[:3000]}")
+                    parts.append(f"[stderr] {stderr}")
                 if out.get("flag"):
                     parts.append(f"*** FLAG FOUND: {out['flag']} ***")
         return "\n".join(parts) if parts else "No output"
@@ -333,9 +334,7 @@ class CTFAgent:
             analysis = self._call_pentestgpt()
             thought_summary = self._extract_thought_summary(analysis)
             self.tried_methods.add(thought_summary[:100])
-            log.append(thought_summary[:600])
-            if len(thought_summary) > 600:
-                log.append("  ... (truncated)")
+            log.append(thought_summary)
 
             # ── Step 2: Extract commands from PentestGPT ──
             log.append("")
@@ -373,7 +372,7 @@ class CTFAgent:
 
             action_summary = self._extract_action_summary(final_commands, source)
             log.append(f"Final commands after review: {len(final_commands)}")
-            log.append(action_summary[:500])
+            log.append(action_summary)
 
             # ── Step 4: Execute ──
             log.append("")
@@ -402,16 +401,16 @@ class CTFAgent:
             else:
                 log.append("No flag in command output")
 
-            # Build observation for GUI display
+            # Build observation for GUI display and PentestGPT history
             full_observation = "\n".join(log)
 
-            # Record history with structured data
+            # Record history — no truncation, store everything
             round_record = {
                 "round": round_num,
                 "thought": thought_summary,
                 "action": action_summary,
                 "observation": full_observation,
-                "observation_summary": observation_summary[:5000],
+                "observation_summary": observation_summary,
                 "commands": final_commands,
                 "hypothesis": analysis.get("hypothesis", self.current_hypothesis),
                 "flag": flag,
