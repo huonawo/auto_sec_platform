@@ -1,13 +1,102 @@
+import base64
 import json
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 
 import httpx as httpx_client
 
 from modules.ctf.ctf_executor import CTFExecutor
 
 logger = logging.getLogger(__name__)
+
+# Pattern for flag detection in decoded base64
+_FLAG_IN_DECODED = re.compile(r"(?:flag|ctf|CTF|FLAG)\{[^}]{4,}\}", re.IGNORECASE)
+
+
+@dataclass
+class AgentState:
+    """Cumulative state that persists across all rounds — never cleared."""
+
+    # Accumulated discoveries (append-only)
+    base64_candidates: list[str] = field(default_factory=list)
+    decoded_results: list[dict] = field(default_factory=list)  # {raw, decoded, is_flag}
+    js_variables: dict = field(default_factory=dict)  # {varName: value}
+    endpoints_tried: dict = field(default_factory=dict)  # {url: status_code}
+    error_patterns: list[str] = field(default_factory=list)
+    cookies: dict = field(default_factory=dict)
+    new_urls: list[str] = field(default_factory=list)
+
+    # Dedup control
+    tried_commands: set = field(default_factory=set)
+
+    # Current reasoning state
+    current_hypothesis: str = "unknown"
+    failed_strategies: list[str] = field(default_factory=list)
+
+
+def extract_and_update(output: str, state: AgentState) -> AgentState:
+    """Extract structured information from command output and append to state.
+
+    This function is additive — it only appends new discoveries, never clears.
+    """
+    if not output:
+        return state
+
+    # 1. Extract base64 candidates (>=16 chars, optional trailing =)
+    candidates = re.findall(r'[A-Za-z0-9+/]{16,}={0,2}', output)
+    for c in candidates:
+        if c not in state.base64_candidates:
+            state.base64_candidates.append(c)
+            try:
+                # Pad to valid base64 length if needed
+                padded = c + "==" if len(c) % 4 else c
+                decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+                is_flag = bool(_FLAG_IN_DECODED.search(decoded))
+                state.decoded_results.append({
+                    "raw": c,
+                    "decoded": decoded,
+                    "is_flag": is_flag,
+                })
+            except Exception:
+                pass
+
+    # 2. Extract JS variable assignments (const/let/var name = "value")
+    js_vars = re.findall(
+        r'(?:const|let|var)\s+(\w+)\s*=\s*["\']([^"\']+)["\']', output
+    )
+    for name, val in js_vars:
+        state.js_variables[name] = val
+
+    # 3. Extract URLs and infer endpoint status
+    urls = re.findall(r'https?://\S+', output)
+    for url in urls:
+        clean_url = url.rstrip(".,;:")
+        if clean_url not in state.new_urls:
+            state.new_urls.append(clean_url)
+    # Infer status codes from output context
+    status_matches = re.findall(r'(https?://\S+)\s+.*?(\d{3})', output)
+    for url, code in status_matches:
+        state.endpoints_tried[url.rstrip(".,;:")] = int(code)
+
+    # 4. Extract error patterns
+    error_keywords = [
+        "SyntaxError", "mysql_error", "Warning:", "Traceback",
+        "undefined", "Segmentation fault", "Permission denied",
+        "404 Not Found", "500 Internal Server Error",
+    ]
+    for kw in error_keywords:
+        if kw in output and kw not in state.error_patterns:
+            state.error_patterns.append(kw)
+
+    # 5. Extract cookies from Set-Cookie headers
+    cookie_matches = re.findall(r'Set-Cookie:\s*(\w+)=([^\s;]+)', output, re.IGNORECASE)
+    for name, val in cookie_matches:
+        state.cookies[name] = val
+
+    return state
+
 
 PENTESTGPT_URL = os.environ.get("PENTESTGPT_URL", "http://auto_sec_pentestgpt:8001")
 SHANNON_URL = os.environ.get("SHANNON_URL", "http://auto_sec_shannon:8002")
@@ -40,9 +129,8 @@ class CTFAgent:
 
         self.executor = CTFExecutor(timeout=60)
         self.history: list[dict] = []
-        self.tried_methods: set[str] = set()
-        self.current_hypothesis: str = ""
         self.skills_context: str = ""
+        self.state = AgentState()
 
     def _load_skills(self):
         """Load CTF skill knowledge base for the challenge category."""
@@ -157,22 +245,58 @@ class CTFAgent:
 
         return cmds[:5]
 
-    def _call_pentestgpt(self) -> dict:
-        """Call PentestGPT /analyze with skill knowledge and history."""
-        history = self._build_history_for_pentestgpt()
+    def _build_state_summary(self) -> str:
+        """Build a summary of AgentState for injection into PentestGPT prompt."""
+        s = self.state
+        parts = []
+        if s.base64_candidates:
+            parts.append(f"Base64候选 ({len(s.base64_candidates)}): {s.base64_candidates[-10:]}")
+        if s.decoded_results:
+            decoded_strs = [
+                f"{r['raw'][:30]}→{r['decoded'][:50]}"
+                + (" [FLAG!]" if r["is_flag"] else "")
+                for r in s.decoded_results[-10:]
+            ]
+            parts.append(f"解码结果: {decoded_strs}")
+        if s.js_variables:
+            parts.append(f"JS变量: {s.js_variables}")
+        if s.endpoints_tried:
+            parts.append(f"已试端点: {s.endpoints_tried}")
+        if s.error_patterns:
+            parts.append(f"错误模式: {s.error_patterns}")
+        if s.cookies:
+            parts.append(f"Cookies: {s.cookies}")
+        if s.failed_strategies:
+            parts.append(f"失败策略: {s.failed_strategies}")
+        if s.current_hypothesis and s.current_hypothesis != "unknown":
+            parts.append(f"当前假设: {s.current_hypothesis}")
+        if s.tried_commands:
+            parts.append(f"已试命令 ({len(s.tried_commands)}): {sorted(s.tried_commands)[-10:]}")
+        return "\n".join(parts) if parts else "（尚无累积信息）"
 
-        # Build context string
-        context_parts = [
-            f"CTF Challenge: {self.ctf_name or 'Unknown'}",
-            f"Category: {self.category}",
-            f"URL/Target: {self.url}",
-            f"Description: {self.description}",
-        ]
-        if self.current_hypothesis:
-            context_parts.append(f"Current Hypothesis: {self.current_hypothesis}")
-        if self.tried_methods:
-            context_parts.append(f"Already Tried: {'; '.join(sorted(self.tried_methods))}")
-        context = "\n".join(context_parts)
+    def _call_pentestgpt(self, round_num: int) -> dict:
+        """Call PentestGPT /analyze with AgentState summary injected into prompt."""
+        history = self._build_history_for_pentestgpt()
+        state_summary = self._build_state_summary()
+
+        # Build the structured context per spec
+        context = (
+            f"=== 目标 ===\n"
+            f"URL: {self.url}\n"
+            f"描述: {self.description}\n"
+            f"类别: {self.category}\n"
+            f"挑战名: {self.ctf_name or 'Unknown'}\n"
+            f"\n=== 已知信息（勿重复探测）===\n"
+            f"{state_summary}\n"
+            f"\n=== 本轮目标 ===\n"
+            f"Round {round_num}/{self.max_rounds}。基于已知信息推进，不要重复已失败的命令。\n"
+        )
+        if self.state.base64_candidates:
+            context += "若发现 base64 候选未解码，exact_commands 必须包含解码命令。\n"
+        if self.state.js_variables:
+            context += "若 JS 变量中有疑似密码/token，必须尝试使用。\n"
+        if self.state.failed_strategies:
+            context += "当前策略已穷尽，必须尝试全新方向。\n"
 
         try:
             resp = httpx_client.post(
@@ -314,8 +438,30 @@ class CTFAgent:
                     parts.append(f"*** FLAG FOUND: {out['flag']} ***")
         return "\n".join(parts) if parts else "No output"
 
+    def _dedup_commands(self, commands: list[str]) -> list[str]:
+        """Filter out already-tried commands. Returns only new ones."""
+        new_commands = []
+        for cmd in commands:
+            normalized = cmd.strip()
+            if normalized and normalized not in self.state.tried_commands:
+                new_commands.append(normalized)
+        return new_commands
+
+    def _check_decoded_flags(self) -> str | None:
+        """Check all decoded base64 results for flags. Returns first match or None."""
+        for result in self.state.decoded_results:
+            if result["is_flag"]:
+                return result["decoded"]
+        return None
+
     def solve(self):
         """Generator that yields per-round results for streaming.
+
+        Four-step loop per round:
+          Step 1: extract_and_update — parse previous round output into AgentState
+          Step 2: base64 decode check — try all candidates, early flag return
+          Step 3: PentestGPT with state summary — inject cumulative knowledge
+          Step 4: command dedup + execute — filter tried commands, run new ones
 
         Yields dicts with keys: type, round, thought, action, observation, flag
         """
@@ -328,18 +474,41 @@ class CTFAgent:
             log.append(f"{'═' * 50}")
             logger.info("[CTF Agent] === Round %d/%d ===", round_num, self.max_rounds)
 
-            # ── Step 1: PentestGPT (with skill knowledge + history) ──
+            # ── Step 1: Extract & update state from previous round output ──
+            if round_num > 1 and self.history:
+                prev_output = self.history[-1].get("observation_summary", "")
+                log.append("")
+                log.append("── Step 1: State Extraction ──")
+                extract_and_update(prev_output, self.state)
+                log.append(f"Base64 candidates: {len(self.state.base64_candidates)}")
+                log.append(f"JS variables: {len(self.state.js_variables)}")
+                log.append(f"Error patterns: {self.state.error_patterns}")
+
+                # ── Step 2: Check decoded base64 for flags ──
+                decoded_flag = self._check_decoded_flags()
+                if decoded_flag:
+                    log.append(f"FLAG FOUND in decoded base64: {decoded_flag}")
+                    full_observation = "\n".join(log)
+                    yield {
+                        "type": "round", "round": round_num,
+                        "thought": "Flag found in decoded base64",
+                        "action": "base64 decode",
+                        "observation": full_observation,
+                        "flag": decoded_flag,
+                        "status": "flag_found",
+                    }
+                    return
+
+            # ── Step 3: PentestGPT with state summary ──
             log.append("")
-            log.append("── Step 1: PentestGPT Analysis ──")
-            analysis = self._call_pentestgpt()
+            log.append("── Step 3: PentestGPT Analysis ──")
+            analysis = self._call_pentestgpt(round_num)
             thought_summary = self._extract_thought_summary(analysis)
-            self.tried_methods.add(thought_summary[:100])
             log.append(thought_summary)
 
-            # ── Step 2: Extract commands from PentestGPT ──
+            # Extract commands from PentestGPT
             log.append("")
-            log.append("── Step 2: Command Planning ──")
-
+            log.append("── Command Planning ──")
             pentestgpt_commands = analysis.get("exact_commands", [])
             if not pentestgpt_commands:
                 pentestgpt_commands = self._fallback_from_analysis(analysis)
@@ -360,83 +529,129 @@ class CTFAgent:
             log.append(f"Source: {source}")
             log.append(f"PentestGPT generated {len(pentestgpt_commands)} command(s)")
 
-            # ── Step 3: Shannon review and optimize ──
+            # Shannon review
             log.append("")
-            log.append("── Step 3: Shannon Review ──")
-            log.append("Calling Shannon /review ...")
-
+            log.append("── Shannon Review ──")
             context = f"Round {round_num}, category: {self.category}"
             if analysis.get("hypothesis"):
                 context += f", hypothesis: {analysis['hypothesis']}"
-            final_commands = self._call_shannon_review(pentestgpt_commands, context)
+            reviewed_commands = self._call_shannon_review(pentestgpt_commands, context)
 
-            action_summary = self._extract_action_summary(final_commands, source)
-            log.append(f"Final commands after review: {len(final_commands)}")
-            log.append(action_summary)
-
-            # ── Step 4: Execute ──
+            # ── Step 4: Command dedup + execute ──
             log.append("")
-            log.append("── Step 4: Command Execution ──")
-            log.append(f"Running in auto_sec_kali ...")
+            log.append("── Step 4: Execution ──")
+            final_commands = self._dedup_commands(reviewed_commands)
 
-            steps = [{"step_id": "ctf-step", "action": source, "commands": final_commands}]
-            step_results = self.executor.execute_steps(steps)
-            observation_summary = self._extract_observation_summary(step_results)
-
-            exec_count = sum(len(sr.get("outputs", [])) for sr in step_results)
-            log.append(f"Executed {exec_count} command(s):")
-            log.append(observation_summary)
-
-            # ── Step 5: Flag check ──
-            log.append("")
-            log.append("── Step 5: Flag Detection ──")
-            flag = None
-            for sr in step_results:
-                if sr.get("flag"):
-                    flag = sr["flag"]
-                    break
-
-            if flag:
-                log.append(f"FLAG FOUND: {flag}")
+            if not final_commands:
+                # All commands already tried — record failed strategy
+                self.state.failed_strategies.append(
+                    analysis.get("hypothesis", self.state.current_hypothesis)
+                )
+                log.append("All commands already tried — strategy exhausted")
+                log.append(f"Failed strategies: {self.state.failed_strategies}")
+                # Force PentestGPT to try a completely new direction next round
+                self.state.current_hypothesis = "策略已穷尽，必须尝试全新方向"
             else:
-                log.append("No flag in command output")
+                # Register commands as tried
+                self.state.tried_commands.update(final_commands)
 
-            # Build observation for GUI display and PentestGPT history
+                action_summary = self._extract_action_summary(final_commands, source)
+                log.append(f"Final commands after dedup: {len(final_commands)}")
+                log.append(action_summary)
+
+                # Execute
+                steps = [{"step_id": "ctf-step", "action": source, "commands": final_commands}]
+                step_results = self.executor.execute_steps(steps)
+                observation_summary = self._extract_observation_summary(step_results)
+
+                exec_count = sum(len(sr.get("outputs", [])) for sr in step_results)
+                log.append(f"Executed {exec_count} command(s):")
+                log.append(observation_summary)
+
+                # Extract state from execution output (for non-round-1 or if round 1 had output)
+                for sr in step_results:
+                    for out in sr.get("outputs", []):
+                        stdout = out.get("stdout", "")
+                        stderr = out.get("stderr", "")
+                        extract_and_update(stdout + "\n" + stderr, self.state)
+
+                # Check decoded flags after extraction
+                decoded_flag = self._check_decoded_flags()
+                if decoded_flag:
+                    log.append(f"FLAG FOUND in decoded base64: {decoded_flag}")
+
+                # ── Flag check from execution ──
+                exec_flag = None
+                for sr in step_results:
+                    if sr.get("flag"):
+                        exec_flag = sr["flag"]
+                        break
+
+                flag = exec_flag or decoded_flag
+
+                if flag:
+                    log.append(f"FLAG FOUND: {flag}")
+                else:
+                    log.append("No flag in command output")
+
+                # Update hypothesis
+                if not flag and observation_summary != "No output":
+                    self.state.current_hypothesis = (
+                        f"Round {round_num}: "
+                        f"{analysis.get('hypothesis', '')}. "
+                        f"Results: {observation_summary[:500]}. "
+                        f"Need to try different approaches."
+                    )
+
+                # Build observation for GUI display
+                full_observation = "\n".join(log)
+
+                # Record history
+                round_record = {
+                    "round": round_num,
+                    "thought": thought_summary,
+                    "action": action_summary,
+                    "observation": full_observation,
+                    "observation_summary": observation_summary,
+                    "commands": final_commands,
+                    "hypothesis": analysis.get("hypothesis", self.state.current_hypothesis),
+                    "flag": flag,
+                }
+                self.history.append(round_record)
+
+                yield {
+                    "type": "round", "round": round_num,
+                    "thought": thought_summary,
+                    "action": action_summary,
+                    "observation": full_observation,
+                    "flag": flag,
+                    "status": "flag_found" if flag else "continuing",
+                }
+
+                if flag:
+                    return
+                continue
+
+            # Strategy exhausted path — still yield a round for GUI
             full_observation = "\n".join(log)
-
-            # Record history — no truncation, store everything
-            round_record = {
+            self.history.append({
                 "round": round_num,
                 "thought": thought_summary,
-                "action": action_summary,
+                "action": "",
                 "observation": full_observation,
-                "observation_summary": observation_summary,
-                "commands": final_commands,
-                "hypothesis": analysis.get("hypothesis", self.current_hypothesis),
-                "flag": flag,
-            }
-            self.history.append(round_record)
-
-            # Update hypothesis
-            if not flag and observation_summary != "No output":
-                self.current_hypothesis = (
-                    f"Round {round_num}: "
-                    f"{analysis.get('hypothesis', '')}. "
-                    f"Results: {observation_summary[:500]}. "
-                    f"Need to try different approaches."
-                )
-
+                "observation_summary": "All commands already tried",
+                "commands": [],
+                "hypothesis": self.state.current_hypothesis,
+                "flag": None,
+            })
             yield {
                 "type": "round", "round": round_num,
                 "thought": thought_summary,
-                "action": action_summary,
+                "action": "",
                 "observation": full_observation,
-                "flag": flag,
-                "status": "flag_found" if flag else "continuing",
+                "flag": None,
+                "status": "continuing",
             }
-
-            if flag:
-                return
 
         # Exhausted all rounds
         yield {
