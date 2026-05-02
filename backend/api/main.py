@@ -99,6 +99,7 @@ class CTFSolveRequest(BaseModel):
     category: str = "web"
     ctf_name: str = ""
     timeout: int = 300
+    options: Optional[dict] = None
 
     @field_validator("category")
     @classmethod
@@ -276,6 +277,7 @@ def ctf_solve(req: CTFSolveRequest):
         ctf_name=req.ctf_name,
         max_rounds=15,
         timeout=req.timeout,
+        options=req.options,
     )
 
     def event_stream():

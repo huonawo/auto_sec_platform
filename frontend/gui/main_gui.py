@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem,
     QTabWidget, QLabel, QGroupBox, QComboBox, QFileDialog, QStatusBar,
     QSplitter, QHeaderView, QMessageBox, QAction, QDialog,
-    QFormLayout, QDialogButtonBox, QSpinBox,
+    QFormLayout, QDialogButtonBox, QSpinBox, QCheckBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QColor
@@ -301,6 +301,9 @@ class AutoSecGUI(QMainWindow):
         self.ctf_timeout_spin.setValue(300)
         self.ctf_timeout_spin.setSuffix("s")
         row3.addWidget(self.ctf_timeout_spin)
+        self.ctf_active_probe_check = QCheckBox("Active probes")
+        self.ctf_active_probe_check.setToolTip("Enable only for authorized CTF or lab targets.")
+        row3.addWidget(self.ctf_active_probe_check)
         self.ctf_solve_btn = QPushButton("Solve")
         self.ctf_solve_btn.setStyleSheet("background: #a6e3a1; color: #1e1e2e;")
         self.ctf_solve_btn.clicked.connect(self._ctf_solve)
@@ -545,6 +548,9 @@ class AutoSecGUI(QMainWindow):
             "category": self.ctf_category_combo.currentText(),
             "ctf_name": self.ctf_name_input.text().strip(),
             "timeout": self.ctf_timeout_spin.value(),
+            "options": {
+                "authorized_active_probes": self.ctf_active_probe_check.isChecked(),
+            },
         }
 
         self._ctf_worker = SSEWorker(api_url, data, timeout=self.ctf_timeout_spin.value())
@@ -615,6 +621,7 @@ class AutoSecGUI(QMainWindow):
         self.ctf_stop_btn.setEnabled(False)
         self.status_bar.showMessage("CTF solver finished")
         self._log("[CTF] Solver finished")
+        self._load_results()
 
     def _on_ctf_error(self, err: str):
         self.ctf_solve_btn.setEnabled(True)

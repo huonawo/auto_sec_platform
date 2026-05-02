@@ -56,6 +56,29 @@ class ScannerSafetyTest(unittest.TestCase):
         self.assertIn("httpx missing", result["httpx_error"])
         self.assertIn("nuclei missing", result["nuclei_error"])
 
+    def test_web_scan_preserves_valid_json_lines_when_later_lines_are_malformed(self):
+        httpx_output = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"url":"http://example.com","status_code":200,'
+                '"title":"Example","webserver":"nginx"}\n'
+                '{not-json}\n'
+            ),
+            stderr="",
+        )
+        nuclei_output = SimpleNamespace(returncode=0, stdout="{not-json}\n", stderr="")
+
+        with patch(
+            "modules.webscan.webscan.subprocess.run",
+            side_effect=[httpx_output, nuclei_output],
+        ):
+            result = WebScanner("http://example.com").run({})
+
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(result["web_context"]["status_code"], 200)
+        self.assertEqual(result["web_context"]["title"], "Example")
+        self.assertTrue(any("invalid JSON" in item for item in result["warnings"]))
+
 
 if __name__ == "__main__":
     unittest.main()
